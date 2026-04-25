@@ -1,0 +1,63 @@
+scenarios:
+  - name: base
+    selectivity_random_effects:
+      cont_tv_fish_sel: ["2dar1_Fleet_1"]
+      fishsel_pe_pars_spec: "fix"
+      fish_sel_devs_spec: "est_all"
+      cont_tv_srv_sel: ["iid_Fleet_1", "2dar1_Fleet_2", "2dar1_Fleet_3"]
+      srvsel_pe_pars_spec: ["fix", "fix", "fix"]
+      srv_sel_devs_spec: ["est_all", "est_all", "est_shared_f_2"]
+      corr_opt_fish_semipar: "corr_zero_y_b"
+      corr_opt_srv_semipar: [null, "corr_zero_y_b", "corr_zero_y_b"]
+      fishsel_pe_pars_log_sigma: 0.30
+      srvsel_bts_logistic_log_sigma: 0.075
+      srvsel_ats_avo_log_sigma: 0.15
+      random_effects: null
+
+  - name: constant
+    selectivity_random_effects:
+      cont_tv_fish_sel: "none_Fleet_1"
+      fishsel_pe_pars_spec: "none"
+      fish_sel_devs_spec: "none"
+      corr_opt_semipar: null
+      random_effects: null
+
+  - name: iid_p
+    selectivity_random_effects:
+      cont_tv_fish_sel: "iid_Fleet_1"
+      fishsel_pe_pars_spec: "est_all"
+      fish_sel_devs_spec: "est_all"
+      corr_opt_semipar: null
+      random_effects: "ln_fishsel_devs"
+
+  - name: rw_p
+    selectivity_random_effects:
+      cont_tv_fish_sel: "rw_Fleet_1"
+      fishsel_pe_pars_spec: "est_all"
+      fish_sel_devs_spec: "est_all"
+      corr_opt_semipar: null
+      random_effects: "ln_fishsel_devs"
+
+  - name: 2dar1_sp
+    selectivity_random_effects:
+      cont_tv_fish_sel: "2dar1_Fleet_1"
+      fishsel_pe_pars_spec: "est_all"
+      fish_sel_devs_spec: "est_all"
+      corr_opt_semipar: null
+      random_effects: "ln_fishsel_devs"
+
+  - name: 3dgmrf_sp
+    selectivity_random_effects:
+      cont_tv_fish_sel: "3dcond_Fleet_1"
+      fishsel_pe_pars_spec: "est_all"
+      fish_sel_devs_spec: "est_all"
+      corr_opt_semipar: null
+      random_effects: "ln_fishsel_devs"
+
+  - name: iid_sp
+    selectivity_random_effects:
+      cont_tv_fish_sel: "3dcond_Fleet_1"
+      fishsel_pe_pars_spec: "est_all"
+      fish_sel_devs_spec: "est_all"
+      corr_opt_semipar: "corr_zero_y_b_c"
+      random_effects: "ln_fishsel_devs"

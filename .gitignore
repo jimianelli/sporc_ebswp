@@ -1,0 +1,11 @@
+.DS_Store
+.Rhistory
+.RData
+Rplots.pdf
+.Rproj.user/
+.vscode/
+.quarto/
+docs/
+analysis/outputs/
+analysis/comparisons/
+data/*.rds

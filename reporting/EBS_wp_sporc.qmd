@@ -1,0 +1,1354 @@
+---
+title: "Eastern Bering Sea Walleye Pollock SPoRC Assessment"
+subtitle: "Bridge model using the SPoRC R package"
+author:
+  - name: "Jim Ianelli"
+  - name: "[Co-authors]"
+date: "`r Sys.Date()`"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    embed-resources: true
+    lightbox: true
+    code-fold: true
+    code-summary: "Show code"
+  pdf:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+execute:
+  echo: true
+  warning: false
+  message: false
+bibliography: references.bib
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+suppressPackageStartupMessages({
+  library(SPoRC)
+  library(yaml)
+  library(ggplot2)
+  library(ggridges)
+  library(ggthemes)
+  library(gt)
+})
+
+repo_root <- if (file.exists("../config/base.yml")) ".." else "."
+repo_path <- function(...) {
+  path <- file.path(...)
+  if (grepl("^/", path)) path else file.path(repo_root, path)
+}
+
+source(repo_path("R", "build_inputs.R"))
+source(repo_path("R", "extract_results.R"))
+
+cfg <- yaml::read_yaml(repo_path("config", "base.yml"))
+raw_data <- readRDS(repo_path(cfg$paths$data_rds))
+base_fit <- readRDS(repo_path(cfg$paths$outputs_dir, "base.rds"))
+input_list <- build_pollock_inputs(cfg, raw_data)
+
+sporc_model_name <- "SPoRC base"
+assessment_year <- max(raw_data$years)
+first_year <- min(raw_data$years)
+n_years <- length(raw_data$years)
+n_ages <- length(raw_data$ages)
+
+array_df <- function(x, dim_names, year_dim = NULL, age_dim = NULL) {
+  idx <- as.data.frame(arrayInd(seq_along(x), dim(x)))
+  names(idx) <- dim_names
+  out <- cbind(idx, value = as.numeric(x))
+  if (!is.null(year_dim)) {
+    out$year <- if (all(out[[year_dim]] %in% seq_along(raw_data$years))) {
+      raw_data$years[out[[year_dim]]]
+    } else {
+      out[[year_dim]]
+    }
+  }
+  if (!is.null(age_dim)) {
+    out$age <- if (all(out[[age_dim]] %in% seq_along(raw_data$ages))) {
+      raw_data$ages[out[[age_dim]]]
+    } else {
+      out[[age_dim]]
+    }
+  }
+  out
+}
+
+make_use_df <- function(x, type, fleets) {
+  out <- array_df(x, c("region", "year_index", "fleet"), year_dim = "year_index")
+  out <- out[out$value != 0, ]
+  out$type <- type
+  out$fleet_name <- fleets[out$fleet]
+  out$series <- paste(out$type, out$fleet_name)
+  out
+}
+
+sporc_ts <- extract_sporc_timeseries(base_fit, years = raw_data$years)
+latest_ts <- sporc_ts[sporc_ts$year == assessment_year, ]
+
+admb_results <- if (file.exists(repo_path(cfg$paths$admb_results_rds))) {
+  readRDS(repo_path(cfg$paths$admb_results_rds))
+} else {
+  NULL
+}
+admb_comparison <- if (!is.null(admb_results)) {
+  compare_timeseries(sporc_ts, admb_results$timeseries)
+} else {
+  NULL
+}
+comparison_summary <- if (!is.null(admb_comparison)) {
+  out <- aggregate(
+    abs(relative_difference) ~ quantity,
+    data = admb_comparison,
+    FUN = max,
+    na.rm = TRUE
+  )
+  names(out)[2] <- "max_abs_relative_difference"
+  out
+} else {
+  data.frame(quantity = character(), max_abs_relative_difference = numeric())
+}
+
+data_availability_df <- rbind(
+  make_use_df(input_list$data$UseCatch, "Catch", "Fishery"),
+  make_use_df(input_list$data$UseFishIdx, "Fishery index", "Fishery CPUE"),
+  make_use_df(input_list$data$UseFishAgeComps, "Fishery age composition", "Fishery"),
+  make_use_df(input_list$data$UseSrvIdx, "Survey index", c("BTS", "ATS", "AVO")),
+  make_use_df(input_list$data$UseSrvAgeComps, "Survey age composition", c("BTS", "ATS", "AVO"))
+)
+
+data_summary <- aggregate(year ~ series, data_availability_df, length)
+names(data_summary) <- c("data_series", "n_years_used")
+year_range <- aggregate(year ~ series, data_availability_df, function(x) {
+  paste(range(x), collapse = "-")
+})
+names(year_range) <- c("data_series", "years")
+data_summary <- merge(data_summary, year_range, by = "data_series")
+data_summary <- data_summary[order(data_summary$data_series), ]
+
+composition_sample_sizes <- rbind(
+  data.frame(
+    fleet = "Fishery",
+    likelihood = cfg$fishery$FishAgeComps_LikeType[[1]],
+    year = raw_data$years,
+    used = as.numeric(input_list$data$UseFishAgeComps[1, , 1]) > 0,
+    input_sample_size = as.numeric(input_list$data$ISS_FishAgeComps[1, , 1, 1])
+  ),
+  data.frame(
+    fleet = "BTS",
+    likelihood = cfg$survey$SrvAgeComps_LikeType[[1]],
+    year = raw_data$years,
+    used = as.numeric(input_list$data$UseSrvAgeComps[1, , 1]) > 0,
+    input_sample_size = as.numeric(input_list$data$ISS_SrvAgeComps[1, , 1, 1])
+  ),
+  data.frame(
+    fleet = "ATS",
+    likelihood = cfg$survey$SrvAgeComps_LikeType[[2]],
+    year = raw_data$years,
+    used = as.numeric(input_list$data$UseSrvAgeComps[1, , 2]) > 0,
+    input_sample_size = as.numeric(input_list$data$ISS_SrvAgeComps[1, , 1, 2])
+  )
+)
+composition_sample_sizes <- composition_sample_sizes[
+  composition_sample_sizes$used &
+    is.finite(composition_sample_sizes$input_sample_size) &
+    composition_sample_sizes$input_sample_size > 0,
+  c("fleet", "likelihood", "year", "input_sample_size")
+]
+
+bio_df <- rbind(
+  transform(
+    array_df(input_list$data$WAA, c("region", "year_index", "age_index", "sex"),
+             year_dim = "year_index", age_dim = "age_index"),
+    quantity = "Spawning weight at age"
+  ),
+  transform(
+    array_df(input_list$data$MatAA, c("region", "year_index", "age_index", "sex"),
+             year_dim = "year_index", age_dim = "age_index"),
+    quantity = "Maturity at age"
+  ),
+  transform(
+    array_df(base_fit$rep$natmort, c("region", "year_index", "age_index", "sex"),
+             year_dim = "year_index", age_dim = "age_index"),
+    quantity = "Natural mortality"
+  )
+)
+bio_df <- bio_df[bio_df$year == assessment_year, ]
+
+catch_pred_df <- transform(
+  array_df(base_fit$rep$PredCatch, c("region", "year_index", "fleet"),
+           year_dim = "year_index"),
+  fitted = value
+)
+catch_obs_df <- transform(
+  array_df(input_list$data$ObsCatch, c("region", "year_index", "fleet"),
+           year_dim = "year_index"),
+  observed = value
+)
+catch_df <- merge(
+  catch_pred_df[, c("region", "year_index", "fleet", "year", "fitted")],
+  catch_obs_df[, c("region", "year_index", "fleet", "year", "observed")],
+  by = c("region", "year_index", "fleet", "year"),
+  sort = FALSE
+)
+catch_df <- catch_df[order(catch_df$year), ]
+catch_df$fleet_name <- "Fishery"
+
+fish_idx_df <- merge(
+  transform(
+    array_df(base_fit$rep$PredFishIdx, c("region", "year_index", "fleet"),
+             year_dim = "year_index"),
+    fleet_name = "Fishery CPUE"
+  ),
+  transform(
+    array_df(input_list$data$ObsFishIdx, c("region", "year_index", "fleet"),
+             year_dim = "year_index"),
+    observed = value
+  )[, c("region", "year_index", "fleet", "year", "observed")],
+  by = c("region", "year_index", "fleet", "year")
+)
+srv_idx_df <- merge(
+  transform(
+    array_df(base_fit$rep$PredSrvIdx, c("region", "year_index", "fleet"),
+             year_dim = "year_index"),
+    fleet_name = c("BTS", "ATS", "AVO")[fleet]
+  ),
+  transform(
+    array_df(input_list$data$ObsSrvIdx, c("region", "year_index", "fleet"),
+             year_dim = "year_index"),
+    observed = value
+  )[, c("region", "year_index", "fleet", "year", "observed")],
+  by = c("region", "year_index", "fleet", "year")
+)
+index_df <- rbind(
+  fish_idx_df[, c("region", "year", "fleet_name", "value", "observed")],
+  srv_idx_df[, c("region", "year", "fleet_name", "value", "observed")]
+)
+
+normalize_comp <- function(data, value_col) {
+  groups <- interaction(data$region, data$fleet, data$year, drop = TRUE)
+  totals <- ave(data[[value_col]], groups, FUN = function(x) sum(x, na.rm = TRUE))
+  data[[value_col]] <- ifelse(is.finite(totals) & totals > 0, data[[value_col]] / totals, NA_real_)
+  data
+}
+
+make_agecomp_fit_df <- function(predicted, observed, used, fleet_names) {
+  pred_df <- transform(
+    array_df(predicted, c("region", "year_index", "age_index", "sex", "fleet"),
+             year_dim = "year_index", age_dim = "age_index"),
+    predicted = value
+  )
+  obs_df <- transform(
+    array_df(observed, c("region", "year_index", "age_index", "sex", "fleet"),
+             year_dim = "year_index", age_dim = "age_index"),
+    observed = value
+  )
+  use_df <- transform(
+    array_df(used, c("region", "year_index", "fleet"), year_dim = "year_index"),
+    use = value
+  )
+  out <- merge(
+    pred_df[, c("region", "year_index", "age_index", "sex", "fleet", "year", "age", "predicted")],
+    obs_df[, c("region", "year_index", "age_index", "sex", "fleet", "year", "age", "observed")],
+    by = c("region", "year_index", "age_index", "sex", "fleet", "year", "age"),
+    sort = FALSE
+  )
+  out <- merge(
+    out,
+    use_df[use_df$use != 0, c("region", "year_index", "fleet")],
+    by = c("region", "year_index", "fleet")
+  )
+  out <- out[is.finite(out$observed) & is.finite(out$predicted), ]
+  out$fleet_name <- fleet_names[out$fleet]
+  out <- normalize_comp(out, "predicted")
+  out <- normalize_comp(out, "observed")
+  out[order(out$fleet, out$year, out$age), ]
+}
+
+fish_agecomp_df <- make_agecomp_fit_df(
+  base_fit$rep$CAA,
+  input_list$data$ObsFishAgeComps,
+  input_list$data$UseFishAgeComps,
+  "Fishery"
+)
+srv_agecomp_df <- make_agecomp_fit_df(
+  base_fit$rep$SrvIAA,
+  input_list$data$ObsSrvAgeComps,
+  input_list$data$UseSrvAgeComps,
+  c("BTS", "ATS", "AVO")
+)
+
+make_comp_matrix <- function(data, fleet_name, value_col) {
+  data <- data[data$fleet_name == fleet_name, ]
+  data <- data[is.finite(data[[value_col]]) & data[[value_col]] >= 0, ]
+  years <- sort(unique(data$year))
+  ages <- sort(unique(data$age))
+  out <- matrix(0, nrow = length(years), ncol = length(ages),
+                dimnames = list(year = years, age = ages))
+  out[cbind(match(data$year, years), match(data$age, ages))] <- data[[value_col]]
+  out
+}
+
+normalize_rows <- function(x) {
+  totals <- rowSums(x, na.rm = TRUE)
+  sweep(x, 1, ifelse(totals > 0, totals, NA_real_), "/")
+}
+
+long_residual_df <- function(x, fleet_name, index_label = "Age") {
+  out <- as.data.frame(as.table(x), stringsAsFactors = FALSE)
+  names(out) <- c("year", "index", "resid")
+  out$year <- as.integer(as.character(out$year))
+  out$index <- as.numeric(as.character(out$index))
+  out$fleet <- fleet_name
+  out$index_label <- index_label
+  out[, c("fleet", "index_label", "year", "index", "resid")]
+}
+
+make_comp_diagnostic <- function(data, fleet_name, n_eff, index_label = "Age",
+                                 exclude_index = numeric(0)) {
+  if (length(exclude_index) > 0) {
+    data <- data[!(data$fleet_name == fleet_name & data$age %in% exclude_index), ]
+  }
+  obs <- normalize_rows(make_comp_matrix(data, fleet_name, "observed"))
+  exp <- normalize_rows(make_comp_matrix(data, fleet_name, "predicted"))
+  keep <- rowSums(is.finite(obs)) == ncol(obs) &
+    rowSums(is.finite(exp)) == ncol(exp) &
+    rowSums(obs, na.rm = TRUE) > 0 &
+    rowSums(exp, na.rm = TRUE) > 0 &
+    is.finite(n_eff) & n_eff > 0
+  obs <- obs[keep, , drop = FALSE]
+  exp <- exp[keep, , drop = FALSE]
+  n_eff <- n_eff[keep]
+  years <- as.integer(rownames(obs))
+  index <- as.numeric(colnames(obs))
+
+  osa_out <- NULL
+  if (requireNamespace("afscOSA", quietly = TRUE)) {
+    osa_out <- tryCatch(
+      afscOSA::run_osa(
+        obs = obs,
+        exp = exp,
+        N = n_eff,
+        fleet = fleet_name,
+        index = index,
+        years = years,
+        index_label = index_label
+      ),
+      error = function(e) NULL
+    )
+  }
+
+  if (!is.null(osa_out)) {
+    osa_out$res$year <- as.integer(as.character(osa_out$res$year))
+    osa_out$res$index <- as.numeric(as.character(osa_out$res$index))
+    osa_out$agg$index <- as.numeric(as.character(osa_out$agg$index))
+    osa_out$method <- "One-step-ahead multinomial residuals"
+    return(osa_out)
+  }
+
+  observed_count <- round(n_eff * obs / rowSums(obs), 0)
+  predicted_prop <- exp / rowSums(exp)
+  expected_count <- sweep(predicted_prop, 1, rowSums(observed_count), "*")
+  pearson <- (observed_count - expected_count) /
+    sqrt(pmax(expected_count, .Machine$double.eps))
+  dimnames(pearson) <- dimnames(obs)
+
+  list(
+    res = long_residual_df(pearson, fleet_name, index_label),
+    agg = data.frame(
+      fleet = fleet_name,
+      index_label = index_label,
+      index = index,
+      obs = colSums(observed_count) / sum(observed_count),
+      exp = colSums(predicted_prop) / sum(predicted_prop)
+    ),
+    method = "Pearson residual fallback"
+  )
+}
+
+year_positions <- match(raw_data$years, raw_data$years)
+fish_neff <- as.numeric(input_list$data$ISS_FishAgeComps[1, year_positions, 1, 1])
+srv_neff <- function(fleet) {
+  as.numeric(input_list$data$ISS_SrvAgeComps[1, year_positions, 1, fleet])
+}
+
+composition_diagnostics <- list(
+  make_comp_diagnostic(
+    fish_agecomp_df,
+    fleet_name = "Fishery",
+    n_eff = fish_neff[match(sort(unique(fish_agecomp_df$year)), raw_data$years)]
+  ),
+  make_comp_diagnostic(
+    srv_agecomp_df,
+    fleet_name = "BTS",
+    n_eff = srv_neff(1)[match(sort(unique(srv_agecomp_df$year[srv_agecomp_df$fleet_name == "BTS"])), raw_data$years)],
+    exclude_index = 1
+  ),
+  make_comp_diagnostic(
+    srv_agecomp_df,
+    fleet_name = "ATS",
+    n_eff = srv_neff(2)[match(sort(unique(srv_agecomp_df$year[srv_agecomp_df$fleet_name == "ATS"])), raw_data$years)],
+    exclude_index = 1
+  )
+)
+composition_diagnostics <- composition_diagnostics[
+  vapply(composition_diagnostics, function(x) nrow(x$res) > 0, logical(1))
+]
+composition_residual_df <- do.call(rbind, lapply(composition_diagnostics, `[[`, "res"))
+composition_aggregate_df <- do.call(rbind, lapply(composition_diagnostics, `[[`, "agg"))
+composition_method <- unique(vapply(composition_diagnostics, `[[`, character(1), "method"))
+composition_residual_df$sign <- ifelse(composition_residual_df$resid < 0, "Negative", "Positive")
+composition_residual_df$outlier <- ifelse(abs(composition_residual_df$resid) > 3, "|residual| > 3", "|residual| <= 3")
+composition_sdnr_df <- aggregate(
+  resid ~ fleet,
+  data = composition_residual_df,
+  FUN = function(x) sd(x, na.rm = TRUE)
+)
+composition_sdnr_df$label <- paste0("SDNR = ", format(round(composition_sdnr_df$resid, 2), nsmall = 2))
+
+plot_composition_residual_bubbles <- function(fleet_name) {
+  data <- composition_residual_df[composition_residual_df$fleet == fleet_name, ]
+  ggplot(
+    data,
+    aes(x = year, y = index, color = sign, size = abs(resid),
+        shape = outlier, alpha = abs(resid))
+  ) +
+    geom_point() +
+    scale_color_manual(values = c(Negative = "#1f78b4", Positive = "#d95f02")) +
+    scale_size(range = c(0.3, 4)) +
+    scale_y_continuous(breaks = sort(unique(data$index))) +
+    labs(x = "Year", y = "Age", color = "Sign", size = "Absolute residual",
+         shape = NULL, alpha = "Absolute residual") +
+    ggthemes::theme_few() +
+    theme(legend.position = "top")
+}
+
+plot_aggregate_composition_fit <- function(fleet_name) {
+  data <- composition_aggregate_df[composition_aggregate_df$fleet == fleet_name, ]
+  ggplot(data, aes(x = index)) +
+    geom_col(aes(y = obs), fill = "#1f78b4", alpha = 0.35, width = 0.8) +
+    geom_line(aes(y = exp), color = "#d95f02", linewidth = 0.8) +
+    geom_point(aes(y = exp), color = "#d95f02", size = 1.8) +
+    scale_x_continuous(breaks = sort(unique(data$index))) +
+    labs(x = "Age", y = "Proportion") +
+    ggthemes::theme_few()
+}
+
+plot_aggregate_composition_fits <- function() {
+  ggplot(composition_aggregate_df, aes(x = index)) +
+    geom_col(aes(y = obs), fill = "#1f78b4", alpha = 0.35, width = 0.8) +
+    geom_line(aes(y = exp), color = "#d95f02", linewidth = 0.8) +
+    geom_point(aes(y = exp), color = "#d95f02", size = 1.8) +
+    scale_x_continuous(breaks = sort(unique(composition_aggregate_df$index))) +
+    facet_wrap(~ fleet, nrow = 1) +
+    labs(x = "Age", y = "Proportion") +
+    ggthemes::theme_few()
+}
+
+selectivity_df <- rbind(
+  transform(
+    array_df(base_fit$rep$fish_sel, c("region", "year_index", "age_index", "sex", "fleet"),
+             year_dim = "year_index", age_dim = "age_index"),
+    fleet_name = "Fishery",
+    fleet_type = "Fishery"
+  ),
+  transform(
+    array_df(base_fit$rep$srv_sel, c("region", "year_index", "age_index", "sex", "fleet"),
+             year_dim = "year_index", age_dim = "age_index"),
+    fleet_name = c("BTS", "ATS", "AVO")[fleet],
+    fleet_type = "Survey"
+  )
+)
+selectivity_all_df <- selectivity_df
+selectivity_start_year <- c(Fishery = first_year, BTS = 1982, ATS = 1994)
+selectivity_ridge_df <- selectivity_all_df[
+  selectivity_all_df$fleet_name %in% names(selectivity_start_year) &
+    selectivity_all_df$age >= 2 &
+    selectivity_all_df$age <= 10,
+]
+selectivity_ridge_df$start_year <- selectivity_start_year[selectivity_ridge_df$fleet_name]
+selectivity_ridge_df <- selectivity_ridge_df[selectivity_ridge_df$year >= selectivity_ridge_df$start_year, ]
+selectivity_ridge_df$year_factor <- factor(selectivity_ridge_df$year)
+selectivity_ridge_df$year_factor <- factor(
+  selectivity_ridge_df$year_factor,
+  levels = rev(sort(unique(selectivity_ridge_df$year)))
+)
+selectivity_ridge_df$relative_value <- ave(
+  selectivity_ridge_df$value,
+  interaction(selectivity_ridge_df$fleet_name, selectivity_ridge_df$year, drop = TRUE),
+  FUN = function(x) {
+    max_x <- max(x, na.rm = TRUE)
+    if (is.finite(max_x) && max_x > 0) x / max_x else NA_real_
+  }
+)
+selectivity_df <- selectivity_all_df[selectivity_all_df$year == assessment_year, ]
+
+plot_selectivity_ridges <- function(fleet_name, fill = "#7b3294") {
+  data <- selectivity_ridge_df[selectivity_ridge_df$fleet_name == fleet_name, ]
+  data$year_factor <- factor(data$year, levels = rev(sort(unique(data$year))))
+  ggplot(data, aes(x = age, y = year_factor, height = relative_value)) +
+    ggridges::geom_density_ridges(
+      stat = "identity",
+      scale = 3.8,
+      alpha = 0.22,
+      fill = fill,
+      color = "black",
+      linewidth = 0.25
+    ) +
+    scale_x_continuous(limits = c(2, 10), breaks = 2:10) +
+    labs(x = "Age (years)", y = "Year") +
+    ggthemes::theme_few()
+}
+
+nll_components <- c(
+  Catch = sum(base_fit$rep$Catch_nLL, na.rm = TRUE),
+  Fishery_index = sum(base_fit$rep$FishIdx_nLL, na.rm = TRUE),
+  Survey_index = sum(base_fit$rep$SrvIdx_nLL, na.rm = TRUE),
+  Fishery_age_composition = sum(base_fit$rep$FishAgeComps_nLL, na.rm = TRUE),
+  Survey_age_composition = sum(base_fit$rep$SrvAgeComps_nLL, na.rm = TRUE),
+  Recruitment = sum(base_fit$rep$Rec_nLL, na.rm = TRUE),
+  Initial_recruitment = sum(base_fit$rep$Init_Rec_nLL, na.rm = TRUE),
+  Fishing_mortality_penalty = sum(base_fit$rep$Fmort_nLL, na.rm = TRUE)
+)
+nll_df <- data.frame(
+  component = gsub("_", " ", names(nll_components)),
+  value = as.numeric(nll_components),
+  row.names = NULL
+)
+nll_df <- nll_df[order(nll_df$value, decreasing = TRUE), ]
+
+srr_points <- data.frame(
+  year = raw_data$years,
+  ssb = as.numeric(base_fit$rep$SSB[1, ]),
+  recruitment = as.numeric(base_fit$rep$Rec[1, ])
+)
+srr_points <- srr_points[is.finite(srr_points$ssb) & is.finite(srr_points$recruitment), ]
+srr_h <- cfg$recruitment$steepness_h
+srr_r0 <- exp(base_fit$par[match("ln_global_R0", names(base_fit$par))])
+srr_ssb0 <- median(as.numeric(base_fit$rep$Dynamic_SSB0), na.rm = TRUE)
+srr_curve <- data.frame(ssb = seq(0, max(srr_points$ssb, na.rm = TRUE) * 1.05, length.out = 200))
+srr_curve$recruitment <- with(
+  srr_curve,
+  (4 * srr_h * srr_r0 * ssb) /
+    (srr_ssb0 * (1 - srr_h) + ssb * (5 * srr_h - 1))
+)
+
+bridge_ts <- NULL
+if (!is.null(admb_results)) {
+  admb_ts <- admb_results$timeseries
+  admb_ts$model <- "ADMB 2024"
+  bridge_ts <- rbind(
+    sporc_ts[sporc_ts$quantity %in% unique(admb_ts$quantity),
+             c("year", "quantity", "value", "model")],
+    admb_ts[, c("year", "quantity", "value", "model")]
+  )
+}
+
+retro_path <- repo_path(cfg$paths$outputs_dir, "retro_5_peel.rds")
+sparsenuts_path <- repo_path(cfg$paths$outputs_dir, "sparsenuts", "sporc_sparsenuts_default.rds")
+sparsenuts_fig_dir <- repo_path(cfg$paths$outputs_dir, "figures")
+retro_df <- NULL
+retro_rel <- NULL
+retro_terminal <- NULL
+retro_rho <- data.frame(quantity = character(), region = integer(), mohns_rho = numeric())
+if (file.exists(retro_path)) {
+  retro_df <- readRDS(retro_path)
+  names(retro_df) <- tolower(names(retro_df))
+  retro_df$year_index <- retro_df$year
+  retro_df$year <- if (all(retro_df$year_index %in% seq_along(raw_data$years))) {
+    raw_data$years[retro_df$year_index]
+  } else {
+    retro_df$year_index
+  }
+  retro_df$quantity <- ifelse(retro_df$type == "SSB", "Spawning biomass", retro_df$type)
+  retro_df$peel_label <- ifelse(retro_df$peel == 0, "Full fit", paste0("Peel ", retro_df$peel))
+  retro_df$peel_label <- factor(
+    retro_df$peel_label,
+    levels = c("Full fit", paste0("Peel ", seq_len(max(retro_df$peel, na.rm = TRUE))))
+  )
+
+  retro_base <- retro_df[retro_df$peel == 0, c("region", "quantity", "year", "value")]
+  names(retro_base)[names(retro_base) == "value"] <- "base_value"
+  retro_rel <- merge(
+    retro_df[retro_df$peel > 0, ],
+    retro_base,
+    by = c("region", "quantity", "year"),
+    sort = FALSE
+  )
+  retro_rel$relative_difference <- (retro_rel$value - retro_rel$base_value) / retro_rel$base_value
+  retro_terminal <- retro_rel[retro_rel$year == assessment_year - retro_rel$peel, ]
+  retro_rho <- aggregate(
+    relative_difference ~ quantity + region,
+    data = retro_terminal,
+    FUN = mean,
+    na.rm = TRUE
+  )
+  names(retro_rho)[names(retro_rho) == "relative_difference"] <- "mohns_rho"
+}
+
+flatten_config <- function(x, prefix = character()) {
+  if (is.list(x) && !is.data.frame(x)) {
+    out <- Map(function(value, name) flatten_config(value, c(prefix, name)), x, names(x))
+    do.call(rbind, out)
+  } else {
+    data.frame(
+      section = if (length(prefix) > 1) prefix[1] else "",
+      setting = paste(prefix, collapse = "."),
+      value = paste(as.character(unlist(x)), collapse = ", "),
+      stringsAsFactors = FALSE
+    )
+  }
+}
+
+config_table <- flatten_config(cfg)
+config_table <- config_table[order(config_table$setting), ]
+
+parameter_summary <- as.data.frame(summary(base_fit$sdrep))
+parameter_summary$parameter <- rownames(parameter_summary)
+parameter_summary$instance <- ave(
+  seq_along(parameter_summary$parameter),
+  parameter_summary$parameter,
+  FUN = seq_along
+)
+parameter_summary$estimate_type <- ifelse(
+  seq_len(nrow(parameter_summary)) <= length(base_fit$par),
+  "Estimated parameter",
+  "Reported quantity"
+)
+parameter_summary <- parameter_summary[
+  parameter_summary$estimate_type == "Estimated parameter",
+  c("parameter", "instance", "Estimate", "Std. Error")
+]
+rownames(parameter_summary) <- NULL
+
+gradient_summary <- data.frame(
+  parameter = names(base_fit$par),
+  gradient = as.numeric(base_fit$sdrep$gradient.fixed),
+  stringsAsFactors = FALSE
+)
+gradient_summary$instance <- ave(
+  seq_along(gradient_summary$parameter),
+  gradient_summary$parameter,
+  FUN = seq_along
+)
+gradient_summary$absolute_gradient <- abs(gradient_summary$gradient)
+gradient_summary <- gradient_summary[
+  order(gradient_summary$absolute_gradient, decreasing = TRUE),
+  c("parameter", "instance", "gradient", "absolute_gradient")
+]
+gradient_summary <- head(gradient_summary, 10)
+
+catchability_diagnostics <- parameter_summary[
+  parameter_summary$parameter %in% c("ln_fish_q", "ln_srv_q"),
+]
+catchability_diagnostics$fleet <- c("Fishery CPUE", "BTS", "ATS", "AVO")[
+  seq_len(nrow(catchability_diagnostics))
+]
+catchability_diagnostics$q_specification <- c(
+  cfg$fishery_selectivity$fish_q_spec,
+  cfg$survey$srv_q_spec
+)[seq_len(nrow(catchability_diagnostics))]
+catchability_diagnostics$q_prior <- c(
+  "none",
+  rep("none", length(cfg$survey$srv_q_spec))
+)[seq_len(nrow(catchability_diagnostics))]
+catchability_diagnostics <- catchability_diagnostics[
+  c("fleet", "parameter", "instance", "Estimate", "Std. Error", "q_specification", "q_prior")
+]
+
+fmt <- function(x, digits = 0) {
+  format(round(x, digits), big.mark = ",", trim = TRUE, scientific = FALSE)
+}
+latest_value <- function(quantity) latest_ts$value[latest_ts$quantity == quantity]
+```
+
+# Executive Summary
+
+This document reports a preliminary Eastern Bering Sea walleye pollock bridge assessment implemented with the `SPoRC` R package [@SPoRC2026]. The run uses the 2024 ADMB assessment data stream conditioned into SPoRC input objects, with a single-area, single-sex, age-structured configuration spanning `r first_year`-`r assessment_year` and `r n_ages` modeled ages.
+
+The current SPoRC base fit estimates `r fmt(latest_value("SSB"))` for spawning stock biomass, `r fmt(latest_value("Total_Biom"))` for total biomass, `r fmt(latest_value("Recruit"))` recruits, and a fishery fishing mortality of `r fmt(latest_value("F"), 3)` in `r assessment_year` (@tbl-current-estimates). These quantities should be read as bridge-model results rather than management advice. The optimizer returned convergence code `r base_fit$optim$convergence` with message "`r base_fit$optim$message`"; the Hessian was `r ifelse(base_fit$sdrep$pdHess, "positive definite", "not positive definite")` and the maximum absolute fixed-effect gradient was `r signif(max(abs(base_fit$sdrep$gradient.fixed), na.rm = TRUE), 3)` (@tbl-convergence).
+
+The bridge comparison with the saved 2024 ADMB result shows broad agreement in some time-series shapes, but important scale differences remain, especially for recruitment and fishing mortality (@fig-admb-bridge, @tbl-admb-bridge). This indicates that the current SPoRC setup is useful for repository development and diagnostics, but not yet a replacement for the accepted ADMB assessment.
+
+# Data
+
+The SPoRC input file is generated by `data-raw/build_ebs_pollock_data.R` from the 2024 ADMB data file and saved as `data/ebs_pollock.rds`. The modeled data include catch, fishery CPUE, fishery age compositions, bottom trawl survey (BTS), acoustic trawl survey (ATS), aerial survey (AVO) indices, and survey age compositions where available. The survey time series are retained as separate information sources because earlier EBS pollock assessment work has shown that multiple surveys can carry distinct signals about abundance, composition, and distribution [@OLeary2020]. Data availability by source is summarized in @tbl-data-summary and shown by year in @fig-data-availability.
+
+```{r}
+#| label: tbl-data-summary
+#| tbl-cap: "Summary of data series included in the SPoRC input object."
+
+gt(data_summary) |>
+  cols_label(
+    data_series = "Data series",
+    n_years_used = "Years used",
+    years = "Year range"
+  )
+```
+
+```{r}
+#| label: fig-data-availability
+#| fig-cap: "Data availability used in the SPoRC base model."
+#| fig-width: 9
+#| fig-height: 5
+
+ggplot(data_availability_df, aes(x = year, y = series)) +
+  geom_point(aes(fill = type), shape = 21, size = 2.6, color = "grey20", alpha = 0.9) +
+  labs(x = "Year", y = NULL, fill = "Data type") +
+  ggthemes::theme_few()
+```
+
+# Model Configuration
+
+The base model is configured in `config/base.yml` and fitted by `analysis/run_scenarios.R`. The model uses one region, one sex, one fishery fleet, and three survey fleets, following the single-region EBS pollock SPoRC case-study configuration [@SPoRCEBSPollockCaseStudy]. Recruitment is modeled with a Beverton-Holt stock-recruit relationship, with fixed steepness and fixed recruitment standard deviations. Initial age-composition deviations are estimated for ages 2 and older and are not penalized as equilibrium recruitment deviations in the current configuration. SPoRC's one-sex spawning biomass calculation applies a 0.5 multiplier internally, so the reported `Aggregated_SSB` is already on a female spawning-biomass basis for comparison with the ADMB assessment. Natural mortality is fixed at age-specific values, catch uncertainty is fixed, and the current base configuration estimates penalized time-varying fishery and survey selectivity. Fishery selectivity uses a dome-shaped `dbnrml` fixed selectivity curve with `2dar1` deviations, correlations fixed at zero, and deviations mapped from 1964 onward; the process-error standard deviation is fixed at 0.30 to allow more interannual variability. BTS survey selectivity uses iid deviations with the underlying logistic age-50 fixed near age 3, and ATS/AVO survey selectivity uses `2dar1` deviations with fleet 3 sharing fleet 2 selectivity parameters. Selectivity is an important bridge-model diagnostic because alternative state-space and time-varying selectivity treatments can materially change catch-at-age assessment behavior [@nielsen2014; @nielsen2021].
+
+Biological inputs used in the terminal model year are shown in @fig-biology. The natural mortality curve follows the fixed age-specific values in the configuration, while maturity and spawning weight at age are taken from the conditioned pollock input data.
+
+```{r}
+#| label: fig-biology
+#| fig-cap: "Terminal-year biological inputs and natural mortality used in the SPoRC base model."
+#| fig-width: 9
+#| fig-height: 6
+
+ggplot(bio_df, aes(x = age, y = value)) +
+  geom_line(linewidth = 0.8, color = "#1b6ca8") +
+  geom_point(size = 1.8, color = "#1b6ca8") +
+  facet_wrap(~ quantity, scales = "free_y", ncol = 1) +
+  labs(x = "Age", y = "Value") +
+  ggthemes::theme_few()
+```
+
+The estimated terminal-year selectivity patterns are shown in @fig-selectivity. The fitted selectivity trajectories are shown as ridge plots for the fishery, BTS, and ATS in @fig-selectivity-time-fishery, @fig-selectivity-time-bts, and @fig-selectivity-time-ats, following the assessment plotting approach in `plot-sel.R`. Each fleet-year curve is normalized to its maximum value before plotting so the figures emphasize changes in the age pattern of vulnerability through time.
+
+```{r}
+#| label: fig-selectivity
+#| fig-cap: "Terminal-year fishery and survey selectivity from the SPoRC base model."
+#| fig-width: 9
+#| fig-height: 6
+
+ggplot(selectivity_df, aes(x = age, y = value, color = fleet_name)) +
+  geom_line(linewidth = 0.9) +
+  facet_wrap(~ fleet_type, scales = "free_y", ncol = 1) +
+  labs(x = "Age", y = "Selectivity", color = "Fleet") +
+  ggthemes::theme_few()
+```
+
+```{r}
+#| label: fig-selectivity-time-fishery
+#| fig-cap: "Relative fishery selectivity over time from the SPoRC base model. Ridgeline heights are normalized within each year."
+#| fig-width: 7.5
+#| fig-height: 10.5
+#| out-width: "100%"
+
+plot_selectivity_ridges("Fishery", fill = "#7b3294")
+```
+
+```{r}
+#| label: fig-selectivity-time-bts
+#| fig-cap: "Relative BTS selectivity over time from the SPoRC base model. Ridgeline heights are normalized within each year."
+#| fig-width: 7.5
+#| fig-height: 10.5
+#| out-width: "100%"
+
+plot_selectivity_ridges("BTS", fill = "#1b6ca8")
+```
+
+```{r}
+#| label: fig-selectivity-time-ats
+#| fig-cap: "Relative ATS selectivity over time from the SPoRC base model. Ridgeline heights are normalized within each year."
+#| fig-width: 7.5
+#| fig-height: 10.5
+#| out-width: "100%"
+
+plot_selectivity_ridges("ATS", fill = "#4daf4a")
+```
+
+# Results
+
+The base run estimates increasing spawning biomass over the terminal portion of the time series and a strong terminal recruitment estimate (@fig-timeseries). In `r assessment_year`, estimated SSB is `r fmt(latest_value("SSB"))`, total biomass is `r fmt(latest_value("Total_Biom"))`, and recruitment is `r fmt(latest_value("Recruit"))` (@tbl-current-estimates).
+
+```{r}
+#| label: tbl-current-estimates
+#| tbl-cap: "Terminal-year estimates from the SPoRC base model."
+
+current_estimates <- latest_ts[, c("quantity", "value")]
+gt(current_estimates) |>
+  fmt_number(columns = value, decimals = 3) |>
+  cols_label(quantity = "Quantity", value = paste("Estimate in", assessment_year))
+```
+
+```{r}
+#| label: fig-timeseries
+#| fig-cap: "SPoRC base model time series for fishing mortality, spawning biomass, total biomass, and recruitment."
+#| fig-width: 9
+#| fig-height: 6
+
+ggplot(sporc_ts, aes(x = year, y = value)) +
+  geom_line(linewidth = 0.8, color = "#1b6ca8") +
+  facet_wrap(~ quantity, scales = "free_y", ncol = 2) +
+  labs(x = "Year", y = "Value") +
+  ggthemes::theme_few()
+```
+
+```{r}
+#| label: fig-stock-recruit
+#| fig-cap: "Stock-recruit relationship from the SPoRC base model. The line is the Beverton-Holt curve using fixed steepness, estimated R0, and the median dynamic unfished spawning biomass; points are annual model estimates labeled by year."
+#| fig-width: 9
+#| fig-height: 6
+
+ggplot() +
+  geom_line(
+    data = srr_curve,
+    aes(x = ssb, y = recruitment),
+    linewidth = 0.9,
+    color = "#1b6ca8"
+  ) +
+  geom_point(
+    data = srr_points,
+    aes(x = ssb, y = recruitment),
+    size = 1.7,
+    color = "#d95f02",
+    alpha = 0.85
+  ) +
+  geom_text(
+    data = srr_points,
+    aes(x = ssb, y = recruitment, label = year),
+    size = 2.4,
+    vjust = -0.45,
+    check_overlap = TRUE
+  ) +
+  labs(x = "Spawning biomass", y = "Recruitment") +
+  ggthemes::theme_few()
+```
+
+The catch fit reproduces the observed catch series closely in most years by construction of the catch likelihood and associated fixed catch uncertainty (@fig-catch-fit). Index fits show larger departures for some survey and CPUE observations, which is expected at this bridge stage because the model configuration has not yet been tuned to reproduce the accepted ADMB assessment (@fig-index-fit).
+
+```{r}
+#| label: fig-catch-fit
+#| fig-cap: "Observed and fitted catch for the SPoRC base model. Points are observations and the line is fitted catch."
+#| fig-width: 9
+#| fig-height: 5
+
+ggplot(catch_df, aes(x = year)) +
+  geom_line(aes(y = fitted), linewidth = 0.8, color = "#1b6ca8") +
+  geom_point(aes(y = observed), size = 1.8, color = "grey15") +
+  facet_wrap(~ fleet_name, scales = "free_y") +
+  labs(x = "Year", y = "Catch") +
+  ggthemes::theme_few()
+```
+
+```{r}
+#| label: fig-index-fit
+#| fig-cap: "Observed and fitted fishery and survey indices for the SPoRC base model. Points are observations and lines are fitted values."
+#| fig-width: 9
+#| fig-height: 6
+
+ggplot(index_df, aes(x = year)) +
+  geom_line(aes(y = value), linewidth = 0.8, color = "#1b6ca8") +
+  geom_point(
+    data = index_df[is.finite(index_df$observed), ],
+    aes(y = observed),
+    size = 1.8,
+    color = "grey15"
+  ) +
+  facet_wrap(~ fleet_name, scales = "free_y", ncol = 2) +
+  labs(x = "Year", y = "Index") +
+  ggthemes::theme_few()
+```
+
+Age-composition fits are shown as predicted proportions at age with observed proportions overlaid for years included in the likelihood. The fishery composition fit is shown in @fig-agecomp-fishery, and the survey composition fits are shown separately for BTS and ATS in @fig-agecomp-bts and @fig-agecomp-ats. The AVO survey does not contribute an age-composition series in the current conditioned input object. Following the assessment diagnostic workflow in `plot_osa_comps.R`, the composition fits are also summarized with residual bubble plots, normal QQ plots, and aggregate observed-versus-expected fits for the Fishery, BTS, and ATS series (@fig-agecomp-residual-fishery, @fig-agecomp-residual-bts, @fig-agecomp-residual-ats, @fig-agecomp-residual-qq, and @fig-agecomp-aggregate-fit). Age 1 is excluded from the BTS and ATS residual diagnostics because it is not used in those survey composition likelihoods. The residual diagnostic method used in this render is `r paste(composition_method, collapse = "; ")`.
+
+```{r}
+#| label: fig-agecomp-fishery
+#| fig-cap: "Observed and predicted fishery age-composition patterns for years included in the SPoRC likelihood."
+#| fig-width: 9
+#| fig-height: 11
+#| out-width: "100%"
+
+ggplot(fish_agecomp_df, aes(x = age, y = predicted)) +
+  geom_line(linewidth = 0.5, color = "#4daf4a") +
+  geom_point(aes(y = observed), color = "#1f78b4", size = 0.9, alpha = 0.8) +
+  facet_wrap(~ year, ncol = 5, dir = "v") +
+  scale_y_continuous(limits = c(0, NA)) +
+  labs(x = "Age", y = "Proportion") +
+  ggthemes::theme_few()
+```
+
+```{r}
+#| label: fig-agecomp-bts
+#| fig-cap: "Observed and predicted BTS age-composition patterns for years included in the SPoRC likelihood."
+#| fig-width: 9
+#| fig-height: 11
+#| out-width: "100%"
+
+ggplot(srv_agecomp_df[srv_agecomp_df$fleet_name == "BTS", ], aes(x = age, y = predicted)) +
+  geom_line(linewidth = 0.5, color = "#4daf4a") +
+  geom_point(aes(y = observed), color = "#1f78b4", size = 0.9, alpha = 0.8) +
+  facet_wrap(~ year, ncol = 4, dir = "v") +
+  scale_y_continuous(limits = c(0, NA)) +
+  labs(x = "Age", y = "Proportion") +
+  ggthemes::theme_few()
+```
+
+```{r}
+#| label: fig-agecomp-ats
+#| fig-cap: "Observed and predicted ATS age-composition patterns for years included in the SPoRC likelihood."
+#| fig-width: 9
+#| fig-height: 11
+#| out-width: "100%"
+
+ggplot(srv_agecomp_df[srv_agecomp_df$fleet_name == "ATS", ], aes(x = age, y = predicted)) +
+  geom_line(linewidth = 0.5, color = "#4daf4a") +
+  geom_point(aes(y = observed), color = "#1f78b4", size = 0.9, alpha = 0.8) +
+  facet_wrap(~ year, ncol = 3, dir = "v") +
+  scale_y_continuous(limits = c(0, NA)) +
+  labs(x = "Age", y = "Proportion") +
+  ggthemes::theme_few()
+```
+
+```{r}
+#| label: fig-agecomp-residual-fishery
+#| fig-cap: "Composition residual bubble diagnostics for the Fishery age-composition fit. Circle size is proportional to the absolute residual; triangles identify absolute residuals greater than 3."
+#| fig-width: 10
+#| fig-height: 3.8
+
+plot_composition_residual_bubbles("Fishery")
+```
+
+```{r}
+#| label: fig-agecomp-residual-bts
+#| fig-cap: "Composition residual bubble diagnostics for the BTS age-composition fit. Circle size is proportional to the absolute residual; triangles identify absolute residuals greater than 3."
+#| fig-width: 10
+#| fig-height: 3.8
+
+plot_composition_residual_bubbles("BTS")
+```
+
+```{r}
+#| label: fig-agecomp-residual-ats
+#| fig-cap: "Composition residual bubble diagnostics for the ATS age-composition fit. Circle size is proportional to the absolute residual; triangles identify absolute residuals greater than 3."
+#| fig-width: 10
+#| fig-height: 3.8
+
+plot_composition_residual_bubbles("ATS")
+```
+
+```{r}
+#| label: fig-agecomp-residual-qq
+#| fig-cap: "Normal QQ diagnostics for the Fishery, BTS, and ATS composition residuals. Labels show the standard deviation of normalized residuals."
+#| fig-width: 10
+#| fig-height: 4
+
+ggplot(composition_residual_df, aes(sample = resid)) +
+  stat_qq(color = "#1f78b4", size = 1.2, alpha = 0.75) +
+  stat_qq_line(color = "grey35", linewidth = 0.6) +
+  geom_text(
+    data = composition_sdnr_df,
+    aes(x = -Inf, y = Inf, label = label),
+    inherit.aes = FALSE,
+    hjust = -0.1,
+    vjust = 1.4,
+    size = 3.2
+  ) +
+  facet_wrap(~ fleet, nrow = 1) +
+  labs(x = "Theoretical quantiles", y = "Sample quantiles") +
+  ggthemes::theme_few()
+```
+
+```{r}
+#| label: fig-agecomp-aggregate-fit
+#| fig-cap: "Aggregate observed and expected age-composition fits for Fishery, BTS, and ATS. Bars are aggregate observed proportions and lines are aggregate expected proportions."
+#| fig-width: 10
+#| fig-height: 4
+
+plot_aggregate_composition_fits()
+```
+
+# Diagnostics
+
+The optimization diagnostics are mixed. The maximum absolute gradient is small, but the optimizer reports singular convergence and the Hessian status should be reviewed directly in @tbl-convergence. This is a clear flag that the base fit should be treated as provisional until additional parameter mapping, starting values, bounds, and likelihood settings are reviewed.
+
+```{r}
+#| label: tbl-convergence
+#| tbl-cap: "SPoRC base model convergence diagnostics."
+
+convergence_summary <- data.frame(
+  model = sporc_model_name,
+  objective = base_fit$optim$objective,
+  convergence_code = base_fit$optim$convergence,
+  convergence_message = base_fit$optim$message,
+  pd_hessian = isTRUE(base_fit$sdrep$pdHess),
+  max_abs_gradient = max(abs(base_fit$sdrep$gradient.fixed), na.rm = TRUE)
+)
+
+gt(convergence_summary) |>
+  fmt_number(columns = c(objective, max_abs_gradient), decimals = 4) |>
+  cols_label(
+    model = "Model",
+    objective = "Objective",
+    convergence_code = "Convergence code",
+    convergence_message = "Message",
+    pd_hessian = "Positive-definite Hessian",
+    max_abs_gradient = "Max. absolute gradient"
+  )
+```
+
+Catchability parameters are estimated freely in the current configuration and do not have q priors (@tbl-catchability-diagnostics). The very large standard errors for fishery CPUE, BTS, and ATS catchability indicate weak scale identification for those index catchabilities in this provisional bridge fit. This is consistent with the false-convergence optimizer message and should be reviewed against the intended SPoRC case-study specification before using the q estimates interpretively.
+
+```{r}
+#| label: tbl-catchability-diagnostics
+#| tbl-cap: "Catchability estimates, standard errors, and current q specification in the SPoRC base model."
+
+gt(catchability_diagnostics) |>
+  fmt_number(columns = c(Estimate, `Std. Error`), decimals = 4) |>
+  cols_label(
+    fleet = "Fleet",
+    parameter = "Parameter",
+    instance = "Instance",
+    Estimate = "Estimate",
+    `Std. Error` = "Standard error",
+    q_specification = "q specification",
+    q_prior = "q prior"
+  )
+```
+
+Likelihood contributions are dominated by the configured composition and recruitment components, with the relative contribution of each component shown in @fig-nll. These values are useful for debugging model weighting and for identifying which data sources are controlling the current fit.
+
+```{r}
+#| label: fig-nll
+#| fig-cap: "Negative log-likelihood components for the SPoRC base model."
+#| fig-width: 9
+#| fig-height: 6
+
+ggplot(nll_df, aes(x = reorder(component, value), y = value)) +
+  geom_col(fill = "#1b6ca8", width = 0.7) +
+  coord_flip() +
+  labs(x = NULL, y = "Negative log-likelihood") +
+  ggthemes::theme_few()
+```
+
+# SparseNUTS MCMC
+
+The SPoRC base model is RTMB-based, so the fitted objective can be passed directly to `SparseNUTS`. Following the Rceattle assessment workflow, I ran `SparseNUTS::sample_snuts()` outside the Quarto render using the package defaults for chains, samples, warmup selection, metric selection, initial values, and control settings, with `cores = 1` for serial RTMB execution. The sampler output and diagnostic figures are saved as assessment artifacts.
+
+This output is a computational diagnostic rather than accepted posterior inference. The default run reported divergent transitions and \(\hat{R}\) and effective sample size diagnostics indicate non-convergence for catchability parameters, so these posterior summaries should not be used for management interpretation without a longer and retuned MCMC run.
+
+```{r}
+#| label: tbl-sparsenuts-status
+#| tbl-cap: "SparseNUTS diagnostic-run summary for the SPoRC base model."
+
+if (file.exists(sparsenuts_path)) {
+  sparsenuts <- readRDS(sparsenuts_path)
+  snuts <- sparsenuts$snuts_fit
+  snuts_diag <- sparsenuts$diagnostics
+  settings <- sparsenuts$sampler_settings
+  postwarmup_per_chain <- dim(snuts$samples)[1] - snuts$warmup
+  total_postwarmup <- postwarmup_per_chain * dim(snuts$samples)[2]
+  max_rhat <- max(snuts$monitor$rhat, na.rm = TRUE)
+  min_ess <- min(snuts$monitor$ess_bulk, na.rm = TRUE)
+  worst_rhat <- snuts$monitor$variable[which.max(snuts$monitor$rhat)]
+  worst_ess <- snuts$monitor$variable[which.min(snuts$monitor$ess_bulk)]
+  divergent_transitions <- round(snuts_diag$perc_divergent / 100 * total_postwarmup)
+
+  snuts_status <- data.frame(
+    metric = c(
+      "Algorithm",
+      "Metric",
+      "Chains",
+      "Warmup iterations per chain",
+      "Post-warmup samples per chain",
+      "Total post-warmup draws",
+      "Minimum bulk ESS",
+      "Minimum bulk ESS parameter",
+      "Maximum Rhat",
+      "Maximum Rhat parameter",
+      "Divergent transitions",
+      "Percent divergent",
+      "Interpretation"
+    ),
+    value = c(
+      snuts$algorithm,
+      snuts$metric,
+      dim(snuts$samples)[2],
+      snuts$warmup,
+      postwarmup_per_chain,
+      total_postwarmup,
+      sprintf("%.1f", min_ess),
+      worst_ess,
+      sprintf("%.3f", max_rhat),
+      worst_rhat,
+      divergent_transitions,
+      sprintf("%.2f%%", snuts_diag$perc_divergent),
+      ifelse(
+        snuts_diag$perc_divergent == 0 && max_rhat < 1.01,
+        "No obvious warning by divergence and Rhat checks.",
+        "Diagnostic only; do not use for inference without retuning."
+      )
+    )
+  )
+
+  gt(snuts_status) |>
+    cols_label(metric = "Metric", value = "Value") |>
+    tab_header(title = "SparseNUTS Diagnostic Run")
+} else {
+  gt(data.frame(note = "SparseNUTS output not available. Run analysis/run_sporc_sparsenuts.R."))
+}
+```
+
+```{r}
+#| label: fig-sparsenuts-pairs
+#| fig-cap: "SparseNUTS pairs plot for the six SPoRC parameters with the largest Rhat values."
+#| fig-width: 8
+#| fig-height: 8
+
+fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_pairs.png")
+if (file.exists(fig)) knitr::include_graphics(fig)
+```
+
+```{r}
+#| label: fig-sparsenuts-marginals
+#| fig-cap: "SparseNUTS marginal posterior intervals for the twelve SPoRC parameters with the largest Rhat values."
+#| fig-width: 8
+#| fig-height: 6
+
+fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_marginals.png")
+if (file.exists(fig)) knitr::include_graphics(fig)
+```
+
+```{r}
+#| label: fig-sparsenuts-trace
+#| fig-cap: "SparseNUTS trace plots for the six SPoRC parameters with the largest Rhat values."
+#| fig-width: 8
+#| fig-height: 6
+
+fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_trace.png")
+if (file.exists(fig)) knitr::include_graphics(fig)
+```
+
+```{r}
+#| label: fig-sparsenuts-sampler
+#| fig-cap: "SparseNUTS sampler-parameter diagnostics for the SPoRC diagnostic run."
+#| fig-width: 8
+#| fig-height: 6
+
+fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_sampler_params.png")
+if (file.exists(fig)) knitr::include_graphics(fig)
+```
+
+```{r}
+#| label: fig-sparsenuts-native-marginals
+#| fig-cap: "SparseNUTS::plot_marginals output for the SPoRC diagnostic run."
+#| fig-width: 8
+#| fig-height: 6
+
+fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_native_marginals.png")
+if (file.exists(fig)) knitr::include_graphics(fig)
+```
+
+```{r}
+#| label: fig-sparsenuts-q
+#| fig-cap: "SparseNUTS::plot_Q output for the SPoRC diagnostic run."
+#| fig-width: 8
+#| fig-height: 6
+
+fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_Q.png")
+if (file.exists(fig)) knitr::include_graphics(fig)
+```
+
+```{r}
+#| label: fig-sparsenuts-uncertainties
+#| fig-cap: "SparseNUTS::plot_uncertainties output for the SPoRC diagnostic run."
+#| fig-width: 8
+#| fig-height: 6
+
+fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_uncertainties.png")
+if (file.exists(fig)) knitr::include_graphics(fig)
+```
+
+# Retrospective Analysis
+
+A five-year retrospective was run by peeling terminal years from the conditioned SPoRC input data and refitting the same base configuration. The resulting spawning biomass and recruitment trajectories are shown in @fig-retro-absolute, with relative differences from the full fit in @fig-retro-relative. Mohn's rho values are calculated from terminal-year relative differences across the five peels and reported in @tbl-retro-rho.
+
+```{r}
+#| label: fig-retro-absolute
+#| fig-cap: "Five-year retrospective trajectories for spawning biomass and recruitment from the SPoRC base model."
+#| fig-width: 9
+#| fig-height: 7
+
+if (!is.null(retro_df)) {
+  ggplot(retro_df, aes(x = year, y = value, color = peel_label, group = peel_label)) +
+    geom_line(linewidth = 0.8) +
+    facet_wrap(~ quantity, scales = "free_y", ncol = 1) +
+    labs(x = "Year", y = "Value", color = "Retrospective peel") +
+    ggthemes::theme_few()
+}
+```
+
+```{r}
+#| label: fig-retro-relative
+#| fig-cap: "Relative differences between each retrospective peel and the full SPoRC base fit. Points identify the terminal year of each peel."
+#| fig-width: 9
+#| fig-height: 7
+
+if (!is.null(retro_rel)) {
+  ggplot(retro_rel, aes(x = year, y = relative_difference, color = peel_label, group = peel_label)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey45") +
+    geom_line(linewidth = 0.8) +
+    geom_point(data = retro_terminal, size = 2) +
+    facet_wrap(~ quantity, scales = "free_y", ncol = 1) +
+    labs(x = "Year", y = "Relative difference from full fit", color = "Retrospective peel") +
+    ggthemes::theme_few()
+}
+```
+
+```{r}
+#| label: tbl-retro-rho
+#| tbl-cap: "Mohn's rho for the five-year SPoRC retrospective analysis."
+
+if (nrow(retro_rho) > 0) {
+  gt(retro_rho) |>
+    fmt_number(columns = mohns_rho, decimals = 3) |>
+    cols_label(
+      quantity = "Quantity",
+      region = "Region",
+      mohns_rho = "Mohn's rho"
+    )
+} else {
+  gt(data.frame(note = "The five-year retrospective output was not available."))
+}
+```
+
+# Bridge Comparison With ADMB
+
+The bridge comparison uses `/Users/jim/_mymods/pollock/results/derived/admb_2024.rds` as the ADMB reference object. The comparison is limited to shared annual quantities: fishing mortality, spawning biomass, and recruitment. The maximum absolute relative differences are shown in @tbl-admb-bridge, and the time series are plotted in @fig-admb-bridge.
+
+```{r}
+#| label: tbl-admb-bridge
+#| tbl-cap: "Maximum absolute relative difference between the SPoRC base model and the 2024 ADMB reference object."
+
+if (nrow(comparison_summary) > 0) {
+  gt(comparison_summary) |>
+    fmt_number(columns = max_abs_relative_difference, decimals = 4) |>
+    cols_label(
+      quantity = "Quantity",
+      max_abs_relative_difference = "Max. absolute relative difference"
+    )
+} else {
+  gt(data.frame(note = "ADMB comparison object was not available."))
+}
+```
+
+```{r}
+#| label: fig-admb-bridge
+#| fig-cap: "Shared SPoRC and ADMB time series for the base-model bridge comparison."
+#| fig-width: 9
+#| fig-height: 6
+
+if (!is.null(bridge_ts)) {
+  ggplot(bridge_ts, aes(x = year, y = value, color = model)) +
+    geom_line(linewidth = 0.8) +
+    facet_wrap(~ quantity, scales = "free_y", ncol = 1) +
+    labs(x = "Year", y = "Value", color = "Model") +
+    ggthemes::theme_few()
+}
+```
+
+The current bridge run does not yet reproduce the ADMB model closely enough for operational use. The largest differences occur in recruitment and fishing mortality, and those differences are large enough to affect interpretation of terminal stock status and future harvest advice. The next development step is to inspect the mapping of recruitment deviations, selectivity forms, catch likelihood treatment, index scaling, and composition likelihood settings against the ADMB model.
+
+# Reproducibility
+
+The assessment artifacts used by this document are:
+
+- SPoRC data object: `data/ebs_pollock.rds`
+- SPoRC base model: `analysis/outputs/base.rds`
+- SPoRC configuration: `config/base.yml`
+- ADMB bridge object: `/Users/jim/_mymods/pollock/results/derived/admb_2024.rds`
+- Five-year retrospective object: `analysis/outputs/retro_5_peel.rds`
+- SparseNUTS diagnostic MCMC object: `analysis/outputs/sparsenuts/sporc_sparsenuts_default.rds`
+
+This document can be rendered from the repository root with:
+
+```sh
+quarto render reporting/EBS_wp_sporc.qmd --to html
+```
+# References {.unnumbered}
+
+::: {#refs}
+:::
+
+<!-- # Appendix {.appendix} -->
+# Appendix 
+
+## Model Configurations
+
+The base model configuration is read from `config/base.yml`. The flattened settings in @tbl-model-config document the exact configuration used by the rendered assessment.
+
+```{r}
+#| label: tbl-model-config
+#| tbl-cap: "Flattened SPoRC base-model configuration settings."
+
+gt(config_table) |>
+  cols_label(
+    section = "Section",
+    setting = "Setting",
+    value = "Value"
+  )
+```
+
+## Input Sample Sizes
+
+The age-composition sample sizes used in the multinomial likelihood calculations are year-specific and are read directly from the conditioned SPoRC input object. The values in @tbl-composition-sample-sizes are the input sample sizes used for fishery, BTS, and ATS age-composition likelihoods.
+
+```{r}
+#| label: tbl-composition-sample-sizes
+#| tbl-cap: "Input sample sizes used for multinomial age-composition likelihood calculations by fleet and year."
+
+gt(composition_sample_sizes, groupname_col = "fleet") |>
+  fmt_number(columns = input_sample_size, decimals = 2) |>
+  cols_label(
+    likelihood = "Likelihood",
+    year = "Year",
+    input_sample_size = "Input sample size"
+  )
+```
+
+## Parameter Estimates
+
+Estimated fixed-effect parameters and their standard errors from the SPoRC base model are shown in @tbl-parameter-estimates. Repeated parameter names are distinguished by their instance number in the underlying parameter vector.
+
+```{r}
+#| label: tbl-parameter-estimates
+#| tbl-cap: "SPoRC base-model fixed-effect parameter estimates and standard errors."
+
+gt(parameter_summary) |>
+  fmt_number(columns = c(Estimate, `Std. Error`), decimals = 4) |>
+  cols_label(
+    parameter = "Parameter",
+    instance = "Instance",
+    Estimate = "Estimate",
+    `Std. Error` = "Standard error"
+  )
+```
+
+## Gradient Diagnostics
+
+The fixed-effect parameters with the largest absolute gradients are shown in @tbl-gradient-diagnostics. These entries identify the parameters that are furthest from satisfying first-order optimality in the current base fit.
+
+```{r}
+#| label: tbl-gradient-diagnostics
+#| tbl-cap: "Fixed-effect parameters with the largest absolute gradients in the SPoRC base model."
+
+gt(gradient_summary) |>
+  fmt_scientific(columns = c(gradient, absolute_gradient), decimals = 3) |>
+  cols_label(
+    parameter = "Parameter",
+    instance = "Instance",
+    gradient = "Gradient",
+    absolute_gradient = "Absolute gradient"
+  )
+```

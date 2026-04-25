@@ -1,0 +1,592 @@
+---
+title: "EBS Pollock stock assessment"
+subtitle: "Scaffold based on Alaska Groundfish Stock Assessment Guidelines (July 2024)"
+author:
+  - name: "Jim Ianelli"
+  - name: "[Co-authors]"
+date: "`r Sys.Date()`"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    embed-resources: true
+  pdf:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+execute:
+  echo: false
+  warning: false
+  message: false
+bibliography: references.bib
+---
+
+# Notes on this scaffold {.unnumbered}
+
+This file is a **Tier 3 stock assessment scaffold** derived from the structure in:
+
+- *Alaska Groundfish Stock Assessment Guidelines* (AFSC, July 2024)
+
+Use this as a starting template for either:
+
+- **Operational Full** assessments (complete detail), or
+- **Operational Update** assessments (abbreviated sections with references to prior full assessment).
+
+Where useful, this template includes prompts for using the `sporc` workflow in this repo.
+
+# Introduction
+
+## September Plan Team products
+
+[Describe preliminary work, bridging runs, and proposed model changes reviewed in September.]
+
+## November Plan Team products
+
+[Describe final draft scope, products, and any constraints on post-submission changes.]
+
+## December Council products
+
+[Describe final outputs, presentations, and SIS reporting status.]
+
+## Assessment product schedule
+
+[State whether this is an operational full, update, or harvest projection year.]
+
+## Unforeseen circumstances
+
+[Document material timeline or data/process disruptions, if any.]
+
+# Outline and format of stock assessments
+
+[Optional short orientation text for reviewers.]
+
+# Assessment definitions
+
+[State assessment type and rationale.]
+
+- Assessment type this year: **[Operational Full / Operational Update / Harvest Projection]**
+- Tier: **3**
+- Base model carried forward from: **[year/chapter]**
+
+# Operational full and update guidelines
+
+## Title page and authorship
+
+[Include required authorship/affiliation/disclaimer text as needed by current SAFE conventions.]
+
+## Executive summary
+
+### Summary of changes in assessment inputs
+
+[Bullet list of data/model/process updates since last accepted assessment.]
+
+### Summary of results
+
+[Concise summary of biomass, fishing mortality, reference points, OFL/ABC outcomes.]
+
+### Responses to SSC and Plan Team comments
+
+#### General stock assessment comments
+
+[Response table or bullets.]
+
+#### Comments specific to this assessment
+
+[Response table or bullets.]
+
+## Introduction
+
+[Stock-specific context, geography, life history, fishery relevance.]
+
+## Fishery and management history
+
+[Management timeline, major changes, current regulations, catch history context.]
+
+## Data
+
+### Fishery data
+
+[Catch, composition, effort, age/length availability, quality checks, key caveats.]
+
+## Survey data
+
+[Survey design, index generation, uncertainty, recent anomalies, inclusion/exclusion decisions.]
+
+## Other data
+
+[Tagging, maturity, environmental covariates, or other sources if used.]
+
+## Analytic approach
+
+[Describe model platform and configuration.]
+
+### SPORC implementation notes
+
+- Config file(s): `config/base.yml`, `config/scenarios.yml`
+- Input building: `R/build_inputs.R` and/or `data-raw/build_ebs_pollock_data.R`
+- Scenario runs: `analysis/run_scenarios.R`
+
+```{r}
+#| label: setup-sporc-results
+#| include: false
+
+suppressPackageStartupMessages({
+  library(SPoRC)
+  library(yaml)
+  library(ggplot2)
+  library(ggthemes)
+  library(gt)
+})
+
+repo_root <- if (file.exists("../config/base.yml")) ".." else "."
+repo_path <- function(...) {
+  path <- file.path(...)
+  if (grepl("^/", path)) path else file.path(repo_root, path)
+}
+
+source(repo_path("R", "build_inputs.R"))
+source(repo_path("R", "extract_results.R"))
+
+cfg <- yaml::read_yaml(repo_path("config", "base.yml"))
+raw_data <- readRDS(repo_path(cfg$paths$data_rds))
+base_fit <- readRDS(repo_path(cfg$paths$outputs_dir, "base.rds"))
+input_list <- build_pollock_inputs(cfg, raw_data)
+
+sporc_model_names <- "SPoRC base"
+
+theme_assessment <- function() {
+  ggthemes::theme_few(base_size = 11) +
+    theme(
+      legend.position = "bottom",
+      strip.background = element_rect(fill = "grey92", color = "grey70"),
+      panel.grid.minor = element_blank()
+    )
+}
+
+array_df <- function(x, dim_names, year_dim = NULL, age_dim = NULL) {
+  out <- as.data.frame.table(x, responseName = "value", stringsAsFactors = FALSE)
+  names(out) <- c(dim_names, "value")
+  for (nm in dim_names) {
+    out[[nm]] <- as.integer(out[[nm]])
+  }
+  if (!is.null(year_dim)) {
+    out$year <- raw_data$years[out[[year_dim]]]
+  }
+  if (!is.null(age_dim)) {
+    out$age <- raw_data$ages[out[[age_dim]]]
+  }
+  out
+}
+
+bio_df <- rbind(
+  transform(
+    array_df(input_list$data$WAA, c("region", "year_index", "age_index", "sex"),
+             year_dim = "year_index", age_dim = "age_index"),
+    quantity = "Spawning weight at age"
+  ),
+  transform(
+    array_df(input_list$data$MatAA, c("region", "year_index", "age_index", "sex"),
+             year_dim = "year_index", age_dim = "age_index"),
+    quantity = "Maturity at age"
+  ),
+  transform(
+    array_df(base_fit$rep$natmort, c("region", "year_index", "age_index", "sex"),
+             year_dim = "year_index", age_dim = "age_index"),
+    quantity = "Natural mortality"
+  )
+)
+bio_df <- bio_df[bio_df$year == max(raw_data$years), ]
+
+make_use_df <- function(x, type, fleets) {
+  out <- array_df(x, c("region", "year_index", "fleet"), year_dim = "year_index")
+  out <- out[out$value != 0, ]
+  out$type <- type
+  out$fleet_name <- fleets[out$fleet]
+  out
+}
+
+data_availability_df <- rbind(
+  make_use_df(input_list$data$UseCatch, "Catch", "Fishery"),
+  make_use_df(input_list$data$UseFishIdx, "Fishery index", "Fishery CPUE"),
+  make_use_df(input_list$data$UseFishAgeComps, "Fishery age composition", "Fishery"),
+  make_use_df(input_list$data$UseSrvIdx, "Survey index", c("BTS", "ATS", "AVO")),
+  make_use_df(input_list$data$UseSrvAgeComps, "Survey age composition", c("BTS", "ATS", "AVO"))
+)
+data_availability_df$series <- paste(data_availability_df$type, data_availability_df$fleet_name)
+sporc_ts <- extract_sporc_timeseries(base_fit, years = raw_data$years)
+
+catch_df <- merge(
+  transform(
+    array_df(base_fit$rep$PredCatch, c("region", "year_index", "fleet"),
+             year_dim = "year_index"),
+    source = "Fitted"
+  ),
+  transform(
+    array_df(input_list$data$ObsCatch, c("region", "year_index", "fleet"),
+             year_dim = "year_index"),
+    observed = value
+  )[, c("region", "year_index", "fleet", "observed")],
+  by = c("region", "year_index", "fleet")
+)
+catch_df$fleet_name <- "Fishery"
+
+fish_idx_df <- merge(
+  transform(
+    array_df(base_fit$rep$PredFishIdx, c("region", "year_index", "fleet"),
+             year_dim = "year_index"),
+    fleet_name = "Fishery CPUE"
+  ),
+  transform(
+    array_df(input_list$data$ObsFishIdx, c("region", "year_index", "fleet"),
+             year_dim = "year_index"),
+    observed = value
+  )[, c("region", "year_index", "fleet", "year", "observed")],
+  by = c("region", "year_index", "fleet", "year")
+)
+srv_idx_df <- merge(
+  transform(
+    array_df(base_fit$rep$PredSrvIdx, c("region", "year_index", "fleet"),
+             year_dim = "year_index"),
+    fleet_name = c("BTS", "ATS", "AVO")[fleet]
+  ),
+  transform(
+    array_df(input_list$data$ObsSrvIdx, c("region", "year_index", "fleet"),
+             year_dim = "year_index"),
+    observed = value
+  )[, c("region", "year_index", "fleet", "year", "observed")],
+  by = c("region", "year_index", "fleet", "year")
+)
+index_df <- rbind(
+  fish_idx_df[, c("region", "year", "fleet_name", "value", "observed")],
+  srv_idx_df[, c("region", "year", "fleet_name", "value", "observed")]
+)
+
+selectivity_df <- rbind(
+  transform(
+    array_df(base_fit$rep$fish_sel, c("region", "year_index", "age_index", "sex", "fleet"),
+             year_dim = "year_index", age_dim = "age_index"),
+    fleet_name = "Fishery",
+    fleet_type = "Fishery"
+  ),
+  transform(
+    array_df(base_fit$rep$srv_sel, c("region", "year_index", "age_index", "sex", "fleet"),
+             year_dim = "year_index", age_dim = "age_index"),
+    fleet_name = c("BTS", "ATS", "AVO")[fleet],
+    fleet_type = "Survey"
+  )
+)
+selectivity_df <- selectivity_df[selectivity_df$year == max(raw_data$years), ]
+
+nll_components <- c(
+  Catch = sum(base_fit$rep$Catch_nLL, na.rm = TRUE),
+  Fishery_index = sum(base_fit$rep$FishIdx_nLL, na.rm = TRUE),
+  Survey_index = sum(base_fit$rep$SrvIdx_nLL, na.rm = TRUE),
+  Fishery_age_composition = sum(base_fit$rep$FishAgeComps_nLL, na.rm = TRUE),
+  Survey_age_composition = sum(base_fit$rep$SrvAgeComps_nLL, na.rm = TRUE),
+  Recruitment = sum(base_fit$rep$Rec_nLL, na.rm = TRUE),
+  Initial_recruitment = sum(base_fit$rep$Init_Rec_nLL, na.rm = TRUE),
+  Fishing_mortality_penalty = sum(base_fit$rep$Fmort_nLL, na.rm = TRUE)
+)
+nll_df <- data.frame(
+  component = gsub("_", " ", names(nll_components)),
+  value = as.numeric(nll_components),
+  row.names = NULL
+)
+nll_df <- nll_df[order(nll_df$value, decreasing = TRUE), ]
+
+admb_path <- repo_path(cfg$paths$admb_results_rds)
+admb_results <- if (file.exists(admb_path)) readRDS(admb_path) else NULL
+admb_comparison <- if (!is.null(admb_results)) {
+  compare_timeseries(sporc_ts, admb_results$timeseries)
+} else {
+  NULL
+}
+```
+
+### Description of alternative models
+
+[For full assessments: list alternatives, rationale, and selection logic.]
+
+## Age structured model results
+
+### Tables
+
+[Insert required SAFE tables for Tier 3.]
+
+```{r}
+#| label: tbl-sporc-convergence
+#| tbl-cap: "SPoRC base model convergence summary."
+
+convergence_summary <- data.frame(
+  model = sporc_model_names,
+  objective = base_fit$optim$objective,
+  convergence_code = base_fit$optim$convergence,
+  convergence_message = base_fit$optim$message,
+  pd_hessian = isTRUE(base_fit$sdrep$pdHess),
+  max_abs_gradient = max(abs(base_fit$sdrep$gradient.fixed), na.rm = TRUE)
+)
+
+gt(convergence_summary) |>
+  fmt_number(columns = c(objective, max_abs_gradient), decimals = 4) |>
+  cols_label(
+    model = "Model",
+    objective = "Objective",
+    convergence_code = "Convergence code",
+    convergence_message = "Message",
+    pd_hessian = "Positive-definite Hessian",
+    max_abs_gradient = "Max. absolute gradient"
+  )
+```
+
+```{r}
+#| label: tbl-admb-comparison
+#| tbl-cap: "Maximum absolute relative difference between the SPoRC base fit and the 2024 ADMB model for shared time series."
+
+if (!is.null(admb_comparison)) {
+  comparison_summary <- aggregate(
+    abs(relative_difference) ~ quantity,
+    data = admb_comparison,
+    FUN = max,
+    na.rm = TRUE
+  )
+  names(comparison_summary)[2] <- "max_abs_relative_difference"
+  gt(comparison_summary) |>
+    fmt_number(columns = max_abs_relative_difference, decimals = 4) |>
+    cols_label(
+      quantity = "Quantity",
+      max_abs_relative_difference = "Max. absolute relative difference"
+    )
+} else {
+  gt(data.frame(note = "ADMB comparison file was not available."))
+}
+```
+
+### Figures
+
+[Insert required SAFE figures for Tier 3.]
+
+```{r}
+#| label: fig-sporc-biological
+#| fig-cap: "SPoRC biological inputs and biological process quantities for the base fit."
+#| fig-width: 9
+#| fig-height: 6
+ggplot(bio_df, aes(x = age, y = value)) +
+  geom_line(linewidth = 0.8, color = "#1b6ca8") +
+  geom_point(size = 1.8, color = "#1b6ca8") +
+  facet_wrap(~ quantity, scales = "free_y", ncol = 1) +
+  labs(x = "Age", y = "Value") +
+  theme_assessment()
+```
+
+```{r}
+#| label: fig-sporc-data-availability
+#| fig-cap: "Data availability used in the SPoRC base fit."
+#| fig-width: 9
+#| fig-height: 5
+ggplot(data_availability_df, aes(x = year, y = series)) +
+  geom_point(aes(fill = type), shape = 21, size = 2.6, color = "grey20", alpha = 0.9) +
+  labs(x = "Year", y = NULL, fill = "Data type") +
+  theme_assessment()
+```
+
+```{r}
+#| label: fig-sporc-timeseries
+#| fig-cap: "SPoRC base fit time series, including biomass, spawning biomass, recruitment, and fishing mortality."
+#| fig-width: 9
+#| fig-height: 6
+ggplot(sporc_ts, aes(x = year, y = value)) +
+  geom_line(linewidth = 0.8, color = "#1b6ca8") +
+  facet_wrap(~ quantity, scales = "free_y", ncol = 2) +
+  labs(x = "Year", y = "Value") +
+  theme_assessment()
+```
+
+```{r}
+#| label: fig-sporc-catch-fits
+#| fig-cap: "Observed and fitted catch for the SPoRC base fit."
+#| fig-width: 9
+#| fig-height: 5
+ggplot(catch_df, aes(x = year)) +
+  geom_line(aes(y = value), linewidth = 0.8, color = "#1b6ca8") +
+  geom_point(aes(y = observed), size = 1.8, color = "grey15") +
+  facet_wrap(~ fleet_name, scales = "free_y") +
+  labs(x = "Year", y = "Catch") +
+  theme_assessment()
+```
+
+```{r}
+#| label: fig-sporc-index-fits
+#| fig-cap: "Observed and fitted survey and fishery indices for the SPoRC base fit."
+#| fig-width: 9
+#| fig-height: 6
+ggplot(index_df, aes(x = year)) +
+  geom_line(aes(y = value), linewidth = 0.8, color = "#1b6ca8") +
+  geom_point(
+    data = index_df[is.finite(index_df$observed), ],
+    aes(y = observed),
+    size = 1.8,
+    color = "grey15"
+  ) +
+  facet_wrap(~ fleet_name, scales = "free_y", ncol = 2) +
+  labs(x = "Year", y = "Index") +
+  theme_assessment()
+```
+
+```{r}
+#| label: fig-sporc-selectivity
+#| fig-cap: "Estimated fishery and survey selectivity for the SPoRC base fit."
+#| fig-width: 9
+#| fig-height: 6
+ggplot(selectivity_df, aes(x = age, y = value, color = fleet_name)) +
+  geom_line(linewidth = 0.9) +
+  facet_wrap(~ fleet_type, scales = "free_y") +
+  labs(x = "Age", y = "Selectivity", color = "Fleet") +
+  theme_assessment()
+```
+
+```{r}
+#| label: fig-sporc-likelihood
+#| fig-cap: "Negative log-likelihood components for the SPoRC base fit."
+#| fig-width: 9
+#| fig-height: 6
+ggplot(nll_df, aes(x = reorder(component, value), y = value)) +
+  geom_col(fill = "#1b6ca8", width = 0.7) +
+  coord_flip() +
+  labs(x = NULL, y = "Negative log-likelihood") +
+  theme_assessment()
+```
+
+```{r}
+#| label: fig-sporc-admb-comparison
+#| fig-cap: "Shared SPoRC and ADMB time series for the base-model bridge comparison."
+#| fig-width: 9
+#| fig-height: 6
+
+if (!is.null(admb_results)) {
+  admb_ts <- admb_results$timeseries
+  admb_ts$model <- "ADMB 2024"
+  bridge_ts <- rbind(
+    sporc_ts[sporc_ts$quantity %in% unique(admb_ts$quantity),
+             c("year", "quantity", "value", "model")],
+    admb_ts[, c("year", "quantity", "value", "model")]
+  )
+
+  ggplot(bridge_ts, aes(x = year, y = value, color = model)) +
+    geom_line(linewidth = 0.8) +
+    facet_wrap(~ quantity, scales = "free_y", ncol = 1) +
+    labs(x = "Year", y = "Value", color = "Model") +
+    theme_assessment()
+}
+```
+
+### Evaluation of model(s) and associated uncertainty
+
+[Diagnostics + uncertainty interpretation.]
+
+### Sensitivity to model specification
+
+[Parameter/process/data sensitivity cases and implications.]
+
+### Convergence status and criteria
+
+[Convergence checks, gradients, Hessian, warnings, remedies.]
+
+### Likelihood profiles on key parameters
+
+[Profiles and interpretation.]
+
+### Retrospective analysis (within model)
+
+[Retrospective setup/results and interpretation.]
+
+### Historical retrospectives (between models)
+
+[Cross-version retrospective comparisons, if applicable.]
+
+## Projections and harvest recommendations
+
+### Amendment 56 reference points
+
+[Specify reference points used.]
+
+### Specification of OFL and maximum permissible ABC
+
+[Derivation and final values.]
+
+### Standard harvest scenarios and projection methodology
+
+[Projection assumptions, scenarios, and implementation details.]
+
+## Risk table and ABC recommendation
+
+[Risk table summary and recommended ABC rationale.]
+
+## Area allocation of ABC
+
+[Allocation method and resulting values.]
+
+## Status determination
+
+[Overfishing/overfished status determination text.]
+
+## F\_limit
+
+[If applicable under current guidance.]
+
+## Ecosystem considerations
+
+[Concise ecosystem context relevant to management advice.]
+
+## Ecosystem effects on the stock
+
+[Effects of ecosystem/state shifts on stock dynamics and uncertainty.]
+
+## Fishery effects on the ecosystem
+
+[Fishery/ecosystem interactions and management implications.]
+
+## Data gaps and research priorities
+
+[Prioritized list for next cycle(s).]
+
+## Acknowledgements
+
+[Contributors, reviewers, data providers, etc.]
+
+## Literature cited
+
+[Automatically generated from bibliography.]
+
+## Auxiliary files
+
+[List model/data/output artifacts and repository locations.]
+
+## Tables
+
+[Consolidated table section if required by chapter formatting.] 
+
+## Figures
+
+[Consolidated figure section if required by chapter formatting.]
+
+## Appendices and working papers
+
+[Include supplemental methods, diagnostics, and additional analyses.]
+
+# Harvest projection guidelines (if this is a projection-only year)
+
+## Title page and authorship
+
+## Executive summary
+
+### Description of updated catch
+
+### Summary of results
+
+### Harvest projection template
+
+### Figures
+
+# References
+
