@@ -5,7 +5,9 @@ Rplots.pdf
 .Rproj.user/
 .vscode/
 .quarto/
-docs/
+docs/*
+!docs/.nojekyll
+!docs/index.html
 analysis/outputs/
 analysis/comparisons/
 data/*.rds
