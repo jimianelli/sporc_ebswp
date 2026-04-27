@@ -924,7 +924,7 @@ ggplot(sporc_ts, aes(x = year, y = value)) +
 
 ```{r}
 #| label: fig-stock-recruit
-#| fig-cap: "Stock-recruit relationship from the SPoRC dev model. The line is the Beverton-Holt curve using fixed steepness, estimated R0, and the median dynamic unfished spawning biomass; points are annual model estimates labeled by year."
+#| fig-cap: "Stock-recruit relationship from the SPoRC dev model. The line is the Beverton-Holt curve using fixed steepness, estimated R0, and the median dynamic unfished spawning biomass; labels show annual model estimates by year."
 #| fig-width: 9
 #| fig-height: 6
 
@@ -934,13 +934,6 @@ ggplot() +
     aes(x = ssb, y = recruitment),
     linewidth = 0.9,
     color = "#1b6ca8"
-  ) +
-  geom_point(
-    data = srr_points,
-    aes(x = ssb, y = recruitment),
-    size = 1.7,
-    color = "#d95f02",
-    alpha = 0.85
   ) +
   geom_text(
     data = srr_points,
