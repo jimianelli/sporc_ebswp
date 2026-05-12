@@ -21,7 +21,7 @@ input_list <- Setup_Mod_Rec(
   sigmaR_switch = 1,
   ln_sigmaR = log(c(1, 1)),
   rec_model = "bh_rec",
-  steepness_h = inv_steepness(0.623013),
+  steepness_h = inv_steepness(0.67),
   h_spec = "fix",
   sigmaR_spec = "fix",
   init_age_strc = 1,

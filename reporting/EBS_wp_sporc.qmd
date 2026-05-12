@@ -601,7 +601,7 @@ if (!is.null(admb_results)) {
 }
 
 retro_path <- repo_path(cfg$paths$outputs_dir, "retro_5_peel.rds")
-sparsenuts_path <- repo_path(cfg$paths$outputs_dir, "sparsenuts", "sporc_sparsenuts_default.rds")
+sparsenuts_path <- repo_path(cfg$paths$outputs_dir, "sparsenuts", "sporc_sparsenuts_vign.rds")
 sparsenuts_fig_dir <- repo_path(cfg$paths$outputs_dir, "figures")
 retro_df <- NULL
 retro_rel <- NULL
@@ -702,7 +702,7 @@ vign_config_table <- data.frame(
     "SPoRC::sgl_rg_ebswp_data",
     "1, 1, 1, 3",
     "bh_rec",
-    "0.623013, fix",
+    "0.67, fix",
     "1, 2",
     "fix, age1 = 0.9, age2 = 0.45, age3plus = 0.3",
     "fix, 0.05",
@@ -1213,7 +1213,7 @@ The assessment artifacts used by this document are:
 - SPoRC configuration: `config/base.yml`
 - ADMB bridge object: `/Users/jim/_mymods/pollock/results/derived/admb_2024.rds`
 - Five-year retrospective object: `analysis/outputs/retro_5_peel.rds`
-- SparseNUTS diagnostic MCMC object: `analysis/outputs/sparsenuts/sporc_sparsenuts_default.rds`
+- SparseNUTS diagnostic MCMC object: `analysis/outputs/sparsenuts/sporc_sparsenuts_vign.rds`
 
 This document can be rendered from the repository root with:
 
@@ -1230,13 +1230,13 @@ quarto render reporting/EBS_wp_sporc.qmd --to html
 
 ## SparseNUTS MCMC
 
-The SPoRC dev model is RTMB-based, so the fitted objective can be passed directly to `SparseNUTS`. Following the Rceattle assessment workflow, I ran `SparseNUTS::sample_snuts()` outside the Quarto render using the package defaults for chains, samples, warmup selection, metric selection, initial values, and control settings, with `cores = 1` for serial RTMB execution. The sampler output and diagnostic figures are saved as assessment artifacts.
+The SPoRC vignette-style base model is RTMB-based, so the fitted objective can be passed to `SparseNUTS`. Following the Rceattle assessment workflow, I ran `SparseNUTS::sample_snuts()` outside the Quarto render using the package defaults for samples, warmup selection, metric selection, initial values, and control settings, with six chains on six cores. For parallel RTMB execution, the objective was rebuilt from `analysis/outputs/vign_input_list.rds` using a top-level SPoRC objective function and explicit globals rather than the `cmb()` closure used by `SPoRC::fit_model()`. The sampler output and diagnostic figures are saved as assessment artifacts.
 
-This output is a computational diagnostic rather than accepted posterior inference. The default run reported divergent transitions and \(\hat{R}\) and effective sample size diagnostics indicate non-convergence for catchability parameters, so these posterior summaries should not be used for management interpretation without a longer and retuned MCMC run.
+This output is a computational diagnostic rather than accepted posterior inference. The six-chain run completed 1,000 post-warmup draws per chain with no divergent transitions and no large \(\hat{R}\) warnings by the summary checks below. SparseNUTS selected the unit metric because the estimated Hessian inverse was not usable for this model, so these posterior summaries should still be treated as diagnostic until the metric and model parameterization are reviewed.
 
 ```{r}
 #| label: tbl-sparsenuts-status
-#| tbl-cap: "SparseNUTS diagnostic-run summary for the SPoRC dev model."
+#| tbl-cap: "SparseNUTS diagnostic-run summary for the SPoRC vignette-style base model."
 
 if (file.exists(sparsenuts_path)) {
   sparsenuts <- readRDS(sparsenuts_path)
@@ -1253,6 +1253,8 @@ if (file.exists(sparsenuts_path)) {
 
   snuts_status <- data.frame(
     metric = c(
+      "Model fit",
+      "Objective mode",
       "Algorithm",
       "Metric",
       "Chains",
@@ -1268,6 +1270,8 @@ if (file.exists(sparsenuts_path)) {
       "Interpretation"
     ),
     value = c(
+      settings$fit_stem,
+      settings$objective_mode,
       snuts$algorithm,
       snuts$metric,
       dim(snuts$samples)[2],
@@ -1292,7 +1296,7 @@ if (file.exists(sparsenuts_path)) {
     cols_label(metric = "Metric", value = "Value") |>
     tab_header(title = "SparseNUTS Diagnostic Run")
 } else {
-  gt(data.frame(note = "SparseNUTS output not available. Run analysis/run_sporc_sparsenuts.R."))
+  gt(data.frame(note = "SparseNUTS output not available. Run analysis/run_sporc_sparsenuts.R with --fit-stem=vign."))
 }
 ```
 
@@ -1302,7 +1306,7 @@ if (file.exists(sparsenuts_path)) {
 #| fig-width: 8
 #| fig-height: 8
 
-fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_pairs.png")
+fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_vign_pairs.png")
 if (file.exists(fig)) knitr::include_graphics(fig)
 ```
 
@@ -1312,7 +1316,7 @@ if (file.exists(fig)) knitr::include_graphics(fig)
 #| fig-width: 8
 #| fig-height: 6
 
-fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_marginals.png")
+fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_vign_marginals.png")
 if (file.exists(fig)) knitr::include_graphics(fig)
 ```
 
@@ -1322,7 +1326,7 @@ if (file.exists(fig)) knitr::include_graphics(fig)
 #| fig-width: 8
 #| fig-height: 6
 
-fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_trace.png")
+fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_vign_trace.png")
 if (file.exists(fig)) knitr::include_graphics(fig)
 ```
 
@@ -1332,7 +1336,7 @@ if (file.exists(fig)) knitr::include_graphics(fig)
 #| fig-width: 8
 #| fig-height: 6
 
-fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_sampler_params.png")
+fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_vign_sampler_params.png")
 if (file.exists(fig)) knitr::include_graphics(fig)
 ```
 
@@ -1342,7 +1346,7 @@ if (file.exists(fig)) knitr::include_graphics(fig)
 #| fig-width: 8
 #| fig-height: 6
 
-fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_native_marginals.png")
+fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_vign_native_marginals.png")
 if (file.exists(fig)) knitr::include_graphics(fig)
 ```
 
@@ -1352,7 +1356,7 @@ if (file.exists(fig)) knitr::include_graphics(fig)
 #| fig-width: 8
 #| fig-height: 6
 
-fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_Q.png")
+fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_vign_Q.png")
 if (file.exists(fig)) knitr::include_graphics(fig)
 ```
 
@@ -1362,7 +1366,7 @@ if (file.exists(fig)) knitr::include_graphics(fig)
 #| fig-width: 8
 #| fig-height: 6
 
-fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_uncertainties.png")
+fig <- file.path(sparsenuts_fig_dir, "sporc_sparsenuts_vign_uncertainties.png")
 if (file.exists(fig)) knitr::include_graphics(fig)
 ```
 

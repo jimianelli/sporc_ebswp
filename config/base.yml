@@ -19,7 +19,7 @@ recruitment:
   sigmaR_switch: 1
   ln_sigmaR: [0.0, 0.0]
   rec_model: "bh_rec"
-  steepness_h: 0.623013
+  steepness_h: 0.67
   steepness_is_h: true
   h_spec: "fix"
   sigmaR_spec: "fix"
