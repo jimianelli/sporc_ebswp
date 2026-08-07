@@ -12,6 +12,10 @@ conditioning in `data-raw/`, model runs in `analysis/`, and reporting in
 - `config/scenarios.yml`: scenario grid for selectivity random effects.
 - `R/build_inputs.R`: converts conditioned pollock data into SPoRC inputs.
 - `R/extract_results.R`: extracts SPoRC time series for comparison.
+- `R/prepare_osa_inputs.R`: freezes composition inputs and their source
+  checksums for one-step-ahead diagnostics.
+- `R/run_osa_comps.R`: runs `afscOSA` and writes the summary and composite
+  diagnostic consumed by the report.
 - `data-raw/build_ebs_pollock_data.R`: builds `data/ebs_pollock.rds` from the
   2024 ADMB data file.
 - `analysis/run_scenarios.R`: fits configured SPoRC scenarios.
@@ -24,7 +28,13 @@ conditioning in `data-raw/`, model runs in `analysis/`, and reporting in
 Rscript data-raw/build_ebs_pollock_data.R
 Rscript analysis/run_scenarios.R
 Rscript analysis/compare_admb.R
+Rscript R/prepare_osa_inputs.R
+Rscript R/run_osa_comps.R
+quarto render reporting/EBS_wp_sporc.qmd --to html
 ```
+
+The report deliberately fails if its precomputed OSA outputs are absent. This
+prevents a render-time fallback from changing the residual method silently.
 
 The comparison script writes:
 

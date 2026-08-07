@@ -5,6 +5,7 @@ author:
   - name: "Jim Ianelli"
   - name: "[Co-authors]"
 date: "`r Sys.Date()`"
+lang: en-US
 format:
   html:
     toc: true
@@ -58,6 +59,13 @@ if (!is.null(vign_fit)) {
   model_fits$vign <- vign_fit
 }
 input_list <- build_pollock_inputs(cfg, raw_data)
+
+osa_output_file <- repo_path(cfg$paths$outputs_dir, "osa", "sporc_ebswp_osa_residuals.rds")
+osa_plot_file <- repo_path(cfg$paths$outputs_dir, "osa", "osa_age_diagnostics.png")
+if (!file.exists(osa_output_file) || !file.exists(osa_plot_file)) {
+  stop("Precomputed OSA outputs are missing. Run R/prepare_osa_inputs.R and R/run_osa_comps.R before rendering.")
+}
+osa_output <- readRDS(osa_output_file)
 
 sporc_model_name <- "dev"
 assessment_year <- max(raw_data$years)
@@ -384,31 +392,11 @@ srv_neff <- function(fleet) {
   as.numeric(input_list$data$ISS_SrvAgeComps[1, year_positions, 1, fleet])
 }
 
-composition_diagnostics <- list(
-  make_comp_diagnostic(
-    fish_agecomp_df,
-    fleet_name = "Fishery",
-    n_eff = fish_neff[match(sort(unique(fish_agecomp_df$year)), raw_data$years)]
-  ),
-  make_comp_diagnostic(
-    srv_agecomp_df,
-    fleet_name = "BTS",
-    n_eff = srv_neff(1)[match(sort(unique(srv_agecomp_df$year[srv_agecomp_df$fleet_name == "BTS"])), raw_data$years)],
-    exclude_index = 1
-  ),
-  make_comp_diagnostic(
-    srv_agecomp_df,
-    fleet_name = "ATS",
-    n_eff = srv_neff(2)[match(sort(unique(srv_agecomp_df$year[srv_agecomp_df$fleet_name == "ATS"])), raw_data$years)],
-    exclude_index = 1
-  )
-)
-composition_diagnostics <- composition_diagnostics[
-  vapply(composition_diagnostics, function(x) nrow(x$res) > 0, logical(1))
-]
+composition_diagnostics <- osa_output$runs
 composition_residual_df <- do.call(rbind, lapply(composition_diagnostics, `[[`, "res"))
 composition_aggregate_df <- do.call(rbind, lapply(composition_diagnostics, `[[`, "agg"))
-composition_method <- unique(vapply(composition_diagnostics, `[[`, character(1), "method"))
+composition_method <- paste0("Precomputed one-step-ahead multinomial residuals (afscOSA ",
+                             osa_output$afscOSA_version, ")")
 composition_residual_df$sign <- ifelse(composition_residual_df$resid < 0, "Negative", "Positive")
 composition_residual_df$outlier <- ifelse(abs(composition_residual_df$resid) > 3, "|residual| > 3", "|residual| <= 3")
 composition_sdnr_df <- aggregate(
@@ -981,7 +969,7 @@ ggplot(index_df, aes(x = year)) +
   ggthemes::theme_few()
 ```
 
-Age-composition fits are shown as predicted proportions at age with observed proportions overlaid for years included in the likelihood. The fishery composition fit is shown in @fig-agecomp-fishery, and the survey composition fits are shown separately for BTS and ATS in @fig-agecomp-bts and @fig-agecomp-ats. The AVO survey does not contribute an age-composition series in the current conditioned input object. Following the assessment diagnostic workflow in `plot_osa_comps.R`, the composition fits are also summarized with residual bubble plots, normal QQ plots, and aggregate observed-versus-expected fits for the Fishery, BTS, and ATS series (@fig-agecomp-residual-fishery, @fig-agecomp-residual-bts, @fig-agecomp-residual-ats, @fig-agecomp-residual-qq, and @fig-agecomp-aggregate-fit). Age 1 is excluded from the BTS and ATS residual diagnostics because it is not used in those survey composition likelihoods. The residual diagnostic method used in this render is `r paste(composition_method, collapse = "; ")`.
+Age-composition fits are shown as predicted proportions at age with observed proportions overlaid for years included in the likelihood. The fishery composition fit is shown in @fig-agecomp-fishery, and the survey composition fits are shown separately for BTS and ATS in @fig-agecomp-bts and @fig-agecomp-ats. The AVO survey does not contribute an age-composition series in the current conditioned input object. The OSA diagnostics are generated before report rendering from the saved model fit and conditioned inputs. Age 1 is excluded from BTS and ATS because it is not used in those survey composition likelihoods.
 
 ```{r}
 #| label: fig-agecomp-fishery
@@ -1031,63 +1019,39 @@ ggplot(srv_agecomp_df[srv_agecomp_df$fleet_name == "ATS", ], aes(x = age, y = pr
   ggthemes::theme_few()
 ```
 
-```{r}
-#| label: fig-agecomp-residual-fishery
-#| fig-cap: "Composition residual bubble diagnostics for the Fishery age-composition fit. Circle size is proportional to the absolute residual; triangles identify absolute residuals greater than 3."
-#| fig-width: 10
-#| fig-height: 3.8
+### OSA residual diagnostics
 
-plot_composition_residual_bubbles("Fishery")
+The diagnostic source is `r basename(osa_output$lineage$base_file)` (MD5
+`r osa_output$lineage$base_md5`), using conditioned data MD5
+`r osa_output$lineage$data_md5` and `r composition_method`. The composite in
+@fig-agecomp-osa contains aggregate fits, QQ checks with expected intervals,
+OSA residual bubbles, and Pearson residual bubbles.
+
+```{r}
+#| label: tbl-osa-summary
+#| tbl-cap: "Summary of precomputed SPoRC one-step-ahead composition residuals."
+
+gt(osa_output$summary) |>
+  fmt_number(columns = c(mean, sdnr, lower_2.5_pct, upper_97.5_pct), decimals = 2)
 ```
 
 ```{r}
-#| label: fig-agecomp-residual-bts
-#| fig-cap: "Composition residual bubble diagnostics for the BTS age-composition fit. Circle size is proportional to the absolute residual; triangles identify absolute residuals greater than 3."
-#| fig-width: 10
-#| fig-height: 3.8
+#| label: fig-agecomp-osa
+#| fig-cap: "SPoRC composition diagnostics for Fishery, BTS, and ATS. Rows show aggregate observed and expected proportions, QQ diagnostics with expected intervals, one-step-ahead residual bubbles, and Pearson residual bubbles."
+#| fig-alt: "Four-row diagnostic panel for Fishery, BTS, and ATS age compositions. It compares aggregate observed and expected proportions, residual quantiles, one-step-ahead residuals by year and age, and Pearson residuals by year and age."
+#| out-width: "100%"
 
-plot_composition_residual_bubbles("BTS")
+knitr::include_graphics(osa_plot_file)
 ```
 
-```{r}
-#| label: fig-agecomp-residual-ats
-#| fig-cap: "Composition residual bubble diagnostics for the ATS age-composition fit. Circle size is proportional to the absolute residual; triangles identify absolute residuals greater than 3."
-#| fig-width: 10
-#| fig-height: 3.8
-
-plot_composition_residual_bubbles("ATS")
-```
-
-```{r}
-#| label: fig-agecomp-residual-qq
-#| fig-cap: "Normal QQ diagnostics for the Fishery, BTS, and ATS composition residuals. Labels show the standard deviation of normalized residuals."
-#| fig-width: 10
-#| fig-height: 4
-
-ggplot(composition_residual_df, aes(sample = resid)) +
-  stat_qq(color = "#1f78b4", size = 1.2, alpha = 0.75) +
-  stat_qq_line(color = "grey35", linewidth = 0.6) +
-  geom_text(
-    data = composition_sdnr_df,
-    aes(x = -Inf, y = Inf, label = label),
-    inherit.aes = FALSE,
-    hjust = -0.1,
-    vjust = 1.4,
-    size = 3.2
-  ) +
-  facet_wrap(~ fleet, nrow = 1) +
-  labs(x = "Theoretical quantiles", y = "Sample quantiles") +
-  ggthemes::theme_few()
-```
-
-```{r}
-#| label: fig-agecomp-aggregate-fit
-#| fig-cap: "Aggregate observed and expected age-composition fits for Fishery, BTS, and ATS. Bars are aggregate observed proportions and lines are aggregate expected proportions."
-#| fig-width: 10
-#| fig-height: 4
-
-plot_aggregate_composition_fits()
-```
+The BTS OSA residuals are more dispersed than a unit-normal benchmark (SDNR
+`r sprintf("%.2f", osa_output$summary$sdnr[osa_output$summary$fleet == "BTS"])`).
+Fishery residual dispersion is also elevated (SDNR
+`r sprintf("%.2f", osa_output$summary$sdnr[osa_output$summary$fleet == "Fishery"])`),
+whereas ATS is closer to one (SDNR
+`r sprintf("%.2f", osa_output$summary$sdnr[osa_output$summary$fleet == "ATS"])`).
+These patterns identify composition fit issues for investigation; they do not
+by themselves establish or reject bridge equivalence.
 
 # Diagnostics
 
