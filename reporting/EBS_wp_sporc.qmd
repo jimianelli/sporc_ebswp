@@ -3,7 +3,7 @@ title: "Eastern Bering Sea Walleye Pollock SPoRC Assessment"
 subtitle: "Bridge model using the SPoRC R package"
 author:
   - name: "Jim Ianelli"
-  - name: "[Co-authors]"
+  - name: "Matt Cheng"
 date: "`r Sys.Date()`"
 lang: en-US
 format:
